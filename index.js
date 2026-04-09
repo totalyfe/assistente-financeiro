@@ -6,20 +6,18 @@ const mongoose = require("mongoose");
 const app = express();
 app.use(express.json());
 
-// Variáveis do .env
 const { 
   OPENAI_API_KEY, 
   ZAPI_TOKEN, 
   ZAPI_INSTANCE, 
-  MONGODB_URI
+  MONGODB_URI,
+  ZAPI_CLIENT_TOKEN // Nova variável que você adicionou no Render
 } = process.env;
 
-// Conectar MongoDB
 mongoose.connect(MONGODB_URI)
   .then(() => console.log("MongoDB conectado 🔥"))
   .catch(err => console.log("Erro MongoDB:", err));
 
-// Model de dados financeiros
 const Finance = mongoose.model("Finance", new mongoose.Schema({
   phone: String,
   tipo: String,
@@ -29,12 +27,10 @@ const Finance = mongoose.model("Finance", new mongoose.Schema({
   data: { type: Date, default: Date.now }
 }));
 
-// Webhook
 app.post("/webhook", async (req, res) => {
   const { phone, text } = req.body;
   const message = text?.message;
 
-  // Log para ver a mensagem chegando no Render
   console.log(`Mensagem recebida de ${phone}: ${message}`);
 
   if (!message || !phone) return res.sendStatus(200);
@@ -42,33 +38,17 @@ app.post("/webhook", async (req, res) => {
   let finalReply = "";
 
   try {
-    // Chamada OpenAI
     const response = await axios.post("https://api.openai.com/v1/chat/completions", {
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: `Você é um assistente financeiro.
-          Se o usuário mencionar um gasto ou receita, responda SOMENTE em JSON:
-          {
-           "salvar": true,
-           "tipo": "Gasto ou Recebimento",
-           "categoria": "",
-           "valor": "",
-           "observacao": ""
-          }
-          Se NÃO for financeiro:
-          {
-           "salvar": false,
-           "resposta": ""
-          }`
+          content: `Você é um assistente financeiro. Responda em JSON se for financeiro ou texto simples se não for.`
         },
         { role: "user", content: message }
       ]
     }, {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`
-      }
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
     });
 
     const aiReply = response.data.choices[0].message.content;
@@ -88,14 +68,12 @@ app.post("/webhook", async (req, res) => {
         valor: Number(data.valor.toString().replace(',', '.')),
         observacao: data.observacao
       });
-
       finalReply = `✅ Registrado!\n\n💸 R$ ${data.valor} - ${data.categoria}\n📝 ${data.observacao}`;
-
     } else {
       finalReply = data.resposta || "Não entendi, pode repetir?";
     }
 
-    // ENVIO PARA Z-API - Ajustado para evitar erro de token
+    // ENVIO PARA Z-API - Agora com o cabeçalho client-token
     await axios.post(
       `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
       {
@@ -104,8 +82,8 @@ app.post("/webhook", async (req, res) => {
       },
       {
         headers: {
-          "Content-Type": "application/json"
-          // Se o erro persistir, precisaremos ativar o client-token no painel e adicionar aqui
+          "Content-Type": "application/json",
+          "client-token": ZAPI_CLIENT_TOKEN // O segredo está aqui!
         }
       }
     );
@@ -119,8 +97,5 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-// Rodar servidor
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT} 🚀`);
-});
+app.listen(PORT, () => console.log(`Rodando na porta ${PORT} 🚀`));
