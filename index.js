@@ -43,46 +43,30 @@ app.post("/webhook", async (req, res) => {
       messages: [
         {
           role: "system",
-          content: `Você é um assistente financeiro profissional.
+          content: `Você é um assistente financeiro.
           
-          Se o usuário descrever um gasto, despesa, compra ou recebimento de dinheiro:
-          Responda OBRIGATORIAMENTE apenas um objeto JSON puro, sem textos extras:
-          {
-           "salvar": true,
-           "tipo": "Gasto" ou "Recebimento",
-           "categoria": "ex: Alimentação, Transporte, Lazer, etc",
-           "valor": 0.00,
-           "observacao": "detalhe curto"
-          }
+          1. Se o usuário quiser REGISTRAR um gasto/receita, responda em JSON:
+          {"acao": "salvar", "tipo": "Gasto/Recebimento", "categoria": "", "valor": 0, "observacao": ""}
 
-          Se for apenas uma saudação ou dúvida geral:
-          {
-           "salvar": false,
-           "resposta": "Sua resposta amigável aqui"
-          }`
+          2. Se o usuário quiser um RESUMO, RELATÓRIO ou saber quanto gastOU, responda em JSON:
+          {"acao": "resumo"}
+
+          3. Se for apenas conversa:
+          {"acao": "conversa", "resposta": "sua resposta"}`
         },
         { role: "user", content: message }
       ],
-      temperature: 0 // Deixa a IA mais precisa e menos "criativa"
+      temperature: 0
     }, {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
     });
 
-    let aiReply = response.data.choices[0].message.content;
-    
-    // Limpeza extra: remove possíveis blocos de código ```json ... ```
-    aiReply = aiReply.replace(/```json|```/g, "").trim();
+    let aiReply = response.data.choices[0].message.content.replace(/```json|```/g, "").trim();
+    let data = JSON.parse(aiReply);
 
-    let data;
-    try {
-      data = JSON.parse(aiReply);
-    } catch {
-      data = { salvar: false, resposta: "Desculpe, tive um problema ao processar esse valor. Pode digitar de novo?" };
-    }
-
-    if (data.salvar) {
+    // LÓGICA 1: SALVAR NO BANCO
+    if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
-      
       await Finance.create({
         phone,
         tipo: data.tipo,
@@ -90,32 +74,49 @@ app.post("/webhook", async (req, res) => {
         valor: valorLimpo,
         observacao: data.observacao
       });
+      finalReply = `✅ *Registrado!*\n\n💰 R$ ${valorLimpo.toFixed(2)}\n📂 ${data.categoria}`;
+    } 
+    
+    // LÓGICA 2: GERAR RESUMO DO MÊS
+    else if (data.acao === "resumo") {
+      const inicioMes = new Date();
+      inicioMes.setDate(1);
+      inicioMes.setHours(0, 0, 0, 0);
 
-      finalReply = `✅ *Registrado com sucesso!*\n\n💰 *Valor:* R$ ${valorLimpo.toFixed(2)}\n📂 *Categoria:* ${data.categoria}\n📝 *Obs:* ${data.observacao}`;
-    } else {
-      finalReply = data.resposta || "Como posso ajudar com suas finanças hoje?";
+      const registros = await Finance.find({
+        phone: phone,
+        data: { $gte: inicioMes }
+      });
+
+      let totalGastos = 0;
+      let totalReceitas = 0;
+
+      registros.forEach(r => {
+        if (r.tipo === "Gasto") totalGastos += r.valor;
+        else totalReceitas += r.valor;
+      });
+
+      finalReply = `📊 *Resumo de ${inicioMes.toLocaleString('pt-BR', { month: 'long' })}*\n\n` +
+                   `🔴 Gastos: R$ ${totalGastos.toFixed(2)}\n` +
+                   `🟢 Receitas: R$ ${totalReceitas.toFixed(2)}\n\n` +
+                   `💰 *Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}*`;
+    } 
+    
+    // LÓGICA 3: CONVERSA FIADA
+    else {
+      finalReply = data.resposta || "Como posso ajudar?";
     }
 
+    // ENVIAR PARA WHATSAPP
     await axios.post(
       `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
-      {
-        phone: phone,
-        message: finalReply
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "client-token": ZAPI_CLIENT_TOKEN
-        }
-      }
+      { phone, message: finalReply },
+      { headers: { "Content-Type": "application/json", "client-token": ZAPI_CLIENT_TOKEN } }
     );
 
-    console.log("Resposta enviada com sucesso! ✅");
-
   } catch (error) {
-    console.log("Erro no processamento:", error.response?.data || error.message);
+    console.log("Erro:", error.message);
   }
-
   res.sendStatus(200);
 });
 
