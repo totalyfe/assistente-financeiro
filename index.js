@@ -11,7 +11,7 @@ const {
   ZAPI_TOKEN, 
   ZAPI_INSTANCE, 
   MONGODB_URI,
-  ZAPI_CLIENT_TOKEN // Nova variável que você adicionou no Render
+  ZAPI_CLIENT_TOKEN 
 } = process.env;
 
 mongoose.connect(MONGODB_URI)
@@ -43,37 +43,59 @@ app.post("/webhook", async (req, res) => {
       messages: [
         {
           role: "system",
-          content: `Você é um assistente financeiro. Responda em JSON se for financeiro ou texto simples se não for.`
+          content: `Você é um assistente financeiro profissional.
+          
+          Se o usuário descrever um gasto, despesa, compra ou recebimento de dinheiro:
+          Responda OBRIGATORIAMENTE apenas um objeto JSON puro, sem textos extras:
+          {
+           "salvar": true,
+           "tipo": "Gasto" ou "Recebimento",
+           "categoria": "ex: Alimentação, Transporte, Lazer, etc",
+           "valor": 0.00,
+           "observacao": "detalhe curto"
+          }
+
+          Se for apenas uma saudação ou dúvida geral:
+          {
+           "salvar": false,
+           "resposta": "Sua resposta amigável aqui"
+          }`
         },
         { role: "user", content: message }
-      ]
+      ],
+      temperature: 0 // Deixa a IA mais precisa e menos "criativa"
     }, {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
     });
 
-    const aiReply = response.data.choices[0].message.content;
-    let data;
+    let aiReply = response.data.choices[0].message.content;
+    
+    // Limpeza extra: remove possíveis blocos de código ```json ... ```
+    aiReply = aiReply.replace(/```json|```/g, "").trim();
 
+    let data;
     try {
       data = JSON.parse(aiReply);
     } catch {
-      data = { salvar: false, resposta: aiReply };
+      data = { salvar: false, resposta: "Desculpe, tive um problema ao processar esse valor. Pode digitar de novo?" };
     }
 
     if (data.salvar) {
+      const valorLimpo = Number(data.valor.toString().replace(',', '.'));
+      
       await Finance.create({
         phone,
         tipo: data.tipo,
         categoria: data.categoria,
-        valor: Number(data.valor.toString().replace(',', '.')),
+        valor: valorLimpo,
         observacao: data.observacao
       });
-      finalReply = `✅ Registrado!\n\n💸 R$ ${data.valor} - ${data.categoria}\n📝 ${data.observacao}`;
+
+      finalReply = `✅ *Registrado com sucesso!*\n\n💰 *Valor:* R$ ${valorLimpo.toFixed(2)}\n📂 *Categoria:* ${data.categoria}\n📝 *Obs:* ${data.observacao}`;
     } else {
-      finalReply = data.resposta || "Não entendi, pode repetir?";
+      finalReply = data.resposta || "Como posso ajudar com suas finanças hoje?";
     }
 
-    // ENVIO PARA Z-API - Agora com o cabeçalho client-token
     await axios.post(
       `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
       {
@@ -83,7 +105,7 @@ app.post("/webhook", async (req, res) => {
       {
         headers: {
           "Content-Type": "application/json",
-          "client-token": ZAPI_CLIENT_TOKEN // O segredo está aqui!
+          "client-token": ZAPI_CLIENT_TOKEN
         }
       }
     );
