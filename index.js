@@ -7,11 +7,7 @@ const app = express();
 app.use(express.json());
 
 const { 
-  OPENAI_API_KEY, 
-  ZAPI_TOKEN, 
-  ZAPI_INSTANCE, 
-  MONGODB_URI,
-  ZAPI_CLIENT_TOKEN 
+  OPENAI_API_KEY, ZAPI_TOKEN, ZAPI_INSTANCE, MONGODB_URI, ZAPI_CLIENT_TOKEN 
 } = process.env;
 
 mongoose.connect(MONGODB_URI)
@@ -31,11 +27,7 @@ app.post("/webhook", async (req, res) => {
   const { phone, text } = req.body;
   const message = text?.message;
 
-  console.log(`Mensagem recebida de ${phone}: ${message}`);
-
   if (!message || !phone) return res.sendStatus(200);
-
-  let finalReply = "";
 
   try {
     const response = await axios.post("https://api.openai.com/v1/chat/completions", {
@@ -43,16 +35,10 @@ app.post("/webhook", async (req, res) => {
       messages: [
         {
           role: "system",
-          content: `Você é um assistente financeiro.
-          
-          1. Se o usuário quiser REGISTRAR um gasto/receita, responda em JSON:
-          {"acao": "salvar", "tipo": "Gasto/Recebimento", "categoria": "", "valor": 0, "observacao": ""}
-
-          2. Se o usuário quiser um RESUMO, RELATÓRIO ou saber quanto gastOU, responda em JSON:
-          {"acao": "resumo"}
-
-          3. Se for apenas conversa:
-          {"acao": "conversa", "resposta": "sua resposta"}`
+          content: `Você é um assistente financeiro. 
+          1. Para salvar: {"acao": "salvar", "tipo": "Gasto/Recebimento", "categoria": "Ex: Mercado, Lazer, Saúde", "valor": 0, "observacao": ""}
+          2. Para resumo: {"acao": "resumo"}
+          3. Para conversa: {"acao": "conversa", "resposta": ""}`
         },
         { role: "user", content: message }
       ],
@@ -64,7 +50,8 @@ app.post("/webhook", async (req, res) => {
     let aiReply = response.data.choices[0].message.content.replace(/```json|```/g, "").trim();
     let data = JSON.parse(aiReply);
 
-    // LÓGICA 1: SALVAR NO BANCO
+    let finalReply = "";
+
     if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
       await Finance.create({
@@ -74,40 +61,53 @@ app.post("/webhook", async (req, res) => {
         valor: valorLimpo,
         observacao: data.observacao
       });
-      finalReply = `✅ *Registrado!*\n\n💰 R$ ${valorLimpo.toFixed(2)}\n📂 ${data.categoria}`;
+      finalReply = `✅ *Registrado!*\n💰 R$ ${valorLimpo.toFixed(2)} em *${data.categoria}*`;
     } 
     
-    // LÓGICA 2: GERAR RESUMO DO MÊS
     else if (data.acao === "resumo") {
       const inicioMes = new Date();
       inicioMes.setDate(1);
       inicioMes.setHours(0, 0, 0, 0);
 
-      const registros = await Finance.find({
-        phone: phone,
-        data: { $gte: inicioMes }
-      });
+      // BUSCA DETALHADA: Agrupando por categoria
+      const resumoCategorias = await Finance.aggregate([
+        { 
+          $match: { 
+            phone: phone, 
+            tipo: "Gasto", 
+            data: { $gte: inicioMes } 
+          } 
+        },
+        { 
+          $group: { 
+            _id: "$categoria", 
+            total: { $sum: "$valor" } 
+          } 
+        },
+        { $sort: { total: -1 } } // Do maior gasto para o menor
+      ]);
 
+      const totaisGerais = await Finance.find({ phone, data: { $gte: inicioMes } });
       let totalGastos = 0;
       let totalReceitas = 0;
+      totaisGerais.forEach(r => r.tipo === "Gasto" ? totalGastos += r.valor : totalReceitas += r.valor);
 
-      registros.forEach(r => {
-        if (r.tipo === "Gasto") totalGastos += r.valor;
-        else totalReceitas += r.valor;
-      });
+      let textoCategorias = resumoCategorias.length > 0 
+        ? resumoCategorias.map(c => `🔹 *${c._id}:* R$ ${c.total.toFixed(2)}`).join('\n')
+        : "Nenhum gasto detalhado ainda.";
 
-      finalReply = `📊 *Resumo de ${inicioMes.toLocaleString('pt-BR', { month: 'long' })}*\n\n` +
-                   `🔴 Gastos: R$ ${totalGastos.toFixed(2)}\n` +
-                   `🟢 Receitas: R$ ${totalReceitas.toFixed(2)}\n\n` +
-                   `💰 *Saldo: R$ ${(totalReceitas - totalGastos).toFixed(2)}*`;
+      finalReply = `📊 *RESUMO DETALHADO - ${inicioMes.toLocaleString('pt-BR', { month: 'long' }).toUpperCase()}*\n\n` +
+                   `📈 *POR CATEGORIA:*\n${textoCategorias}\n\n` +
+                   `--------------------------\n` +
+                   `🔴 Total Gastos: R$ ${totalGastos.toFixed(2)}\n` +
+                   `🟢 Total Receitas: R$ ${totalReceitas.toFixed(2)}\n\n` +
+                   `💰 *SALDO ATUAL: R$ ${(totalReceitas - totalGastos).toFixed(2)}*`;
     } 
     
-    // LÓGICA 3: CONVERSA FIADA
     else {
       finalReply = data.resposta || "Como posso ajudar?";
     }
 
-    // ENVIAR PARA WHATSAPP
     await axios.post(
       `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
       { phone, message: finalReply },
@@ -121,4 +121,4 @@ app.post("/webhook", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Rodando na porta ${PORT} 🚀`));
+app.listen(PORT, () => console.log(`Servidor Ativo 🚀`));
