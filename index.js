@@ -34,7 +34,7 @@ app.post("/webhook", async (req, res) => {
   const { phone, text } = req.body;
   const message = text?.message;
 
-  // Log para você ver no Render quando uma mensagem chegar
+  // Log para ver a mensagem chegando no Render
   console.log(`Mensagem recebida de ${phone}: ${message}`);
 
   if (!message || !phone) return res.sendStatus(200);
@@ -42,9 +42,9 @@ app.post("/webhook", async (req, res) => {
   let finalReply = "";
 
   try {
-    // Chamada OpenAI - MODELO CORRIGIDO PARA gpt-4o-mini
+    // Chamada OpenAI
     const response = await axios.post("https://api.openai.com/v1/chat/completions", {
-      model: "gpt-4o-mini", 
+      model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
@@ -85,7 +85,7 @@ app.post("/webhook", async (req, res) => {
         phone,
         tipo: data.tipo,
         categoria: data.categoria,
-        valor: Number(data.valor.toString().replace(',', '.')), // Garante que vírgula vire ponto para o banco
+        valor: Number(data.valor.toString().replace(',', '.')),
         observacao: data.observacao
       });
 
@@ -95,19 +95,24 @@ app.post("/webhook", async (req, res) => {
       finalReply = data.resposta || "Não entendi, pode repetir?";
     }
 
-    // Enviar mensagem via Z-API
+    // ENVIO PARA Z-API - Ajustado para evitar erro de token
     await axios.post(
       `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
       {
         phone: phone,
         message: finalReply
+      },
+      {
+        headers: {
+          "Content-Type": "application/json"
+          // Se o erro persistir, precisaremos ativar o client-token no painel e adicionar aqui
+        }
       }
     );
 
-    console.log("Resposta enviada com sucesso!");
+    console.log("Resposta enviada com sucesso! ✅");
 
   } catch (error) {
-    // Esse log vai te mostrar no Render EXATAMENTE onde deu erro se falhar
     console.log("Erro no processamento:", error.response?.data || error.message);
   }
 
