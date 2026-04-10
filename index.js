@@ -14,6 +14,9 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("MongoDB conectado 🔥"))
   .catch(err => console.log("Erro MongoDB:", err));
 
+// --- MODELOS DE DADOS ---
+
+// Modelo de Gastos
 const Finance = mongoose.model("Finance", new mongoose.Schema({
   phone: String,
   tipo: String,
@@ -23,6 +26,26 @@ const Finance = mongoose.model("Finance", new mongoose.Schema({
   data: { type: Date, default: Date.now }
 }));
 
+// Modelo de Usuários (NOVO)
+const User = mongoose.model("User", new mongoose.Schema({
+  phone: String,
+  name: String,
+  active: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now }
+}));
+
+// --- FUNÇÃO DE ENVIO Z-API ---
+async function sendZap(phone, message) {
+  try {
+    await axios.post(
+      `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
+      { phone, message },
+      { headers: { "Content-Type": "application/json", "client-token": ZAPI_CLIENT_TOKEN } }
+    );
+  } catch (e) { console.log("Erro envio:", e.message); }
+}
+
+// --- WEBHOOK PRINCIPAL ---
 app.post("/webhook", async (req, res) => {
   const { phone, text } = req.body;
   const message = text?.message;
@@ -30,89 +53,79 @@ app.post("/webhook", async (req, res) => {
   if (!message || !phone) return res.sendStatus(200);
 
   try {
+    // 1. VERIFICAR SE O USUÁRIO JÁ EXISTE
+    let user = await User.findOne({ phone });
+
+    // 2. SE NÃO EXISTE, É UM NOVO CADASTRO
+    if (!user) {
+      // Se for a primeira mensagem, iniciamos o cadastro
+      // Se a mensagem for só o nome, salvamos. Mas vamos usar a IA para extrair o nome de forma limpa.
+      const nameResponse = await axios.post("https://api.openai.com/v1/chat/completions", {
+        model: "gpt-4o-mini",
+        messages: [{ role: "system", content: "O usuário está se apresentando. Extraia APENAS o primeiro nome dele. Se não houver nome, responda 'PEDIR'." }, { role: "user", content: message }],
+        temperature: 0
+      }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
+
+      const extractedName = nameResponse.data.choices[0].message.content.trim();
+
+      if (extractedName === "PEDIR") {
+        await sendZap(phone, "👋 Olá! Sou seu novo Assistente Financeiro IA. \n\nAinda não te conheço. *Qual é o seu nome?*");
+        return res.sendStatus(200);
+      } else {
+        await User.create({ phone, name: extractedName });
+        await sendZap(phone, `Prazer em te conhecer, *${extractedName}*! 🎉\n\nAgora você já pode anotar seus gastos. Exemplo:\n- "Almoço 35 reais"\n- "Recebi 2000 de salário"\n- "Resumo"`);
+        return res.sendStatus(200);
+      }
+    }
+
+    // 3. SE JÁ EXISTE, SEGUE O FLUXO NORMAL
     const response = await axios.post("https://api.openai.com/v1/chat/completions", {
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: `Você é um assistente financeiro. 
-          1. Para salvar: {"acao": "salvar", "tipo": "Gasto/Recebimento", "categoria": "Ex: Mercado, Lazer, Saúde", "valor": 0, "observacao": ""}
-          2. Para resumo: {"acao": "resumo"}
-          3. Para conversa: {"acao": "conversa", "resposta": ""}`
+          content: `Você é o assistente de ${user.name}. 
+          Responda em JSON:
+          1. Salvar: {"acao": "salvar", "tipo": "Gasto/Recebimento", "categoria": "", "valor": 0, "observacao": ""}
+          2. Resumo: {"acao": "resumo"}
+          3. Conversa: {"acao": "conversa", "resposta": ""}`
         },
         { role: "user", content: message }
       ],
       temperature: 0
-    }, {
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
-    });
+    }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
 
     let aiReply = response.data.choices[0].message.content.replace(/```json|```/g, "").trim();
     let data = JSON.parse(aiReply);
 
-    let finalReply = "";
-
     if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
-      await Finance.create({
-        phone,
-        tipo: data.tipo,
-        categoria: data.categoria,
-        valor: valorLimpo,
-        observacao: data.observacao
-      });
-      finalReply = `✅ *Registrado!*\n💰 R$ ${valorLimpo.toFixed(2)} em *${data.categoria}*`;
+      await Finance.create({ phone, tipo: data.tipo, categoria: data.categoria, valor: valorLimpo, observacao: data.observacao });
+      await sendZap(phone, `✅ *Lançado, ${user.name}!*\n💰 R$ ${valorLimpo.toFixed(2)} em *${data.categoria}*`);
     } 
     
     else if (data.acao === "resumo") {
       const inicioMes = new Date();
-      inicioMes.setDate(1);
-      inicioMes.setHours(0, 0, 0, 0);
+      inicioMes.setDate(1); inicioMes.setHours(0, 0, 0, 0);
 
-      // BUSCA DETALHADA: Agrupando por categoria
       const resumoCategorias = await Finance.aggregate([
-        { 
-          $match: { 
-            phone: phone, 
-            tipo: "Gasto", 
-            data: { $gte: inicioMes } 
-          } 
-        },
-        { 
-          $group: { 
-            _id: "$categoria", 
-            total: { $sum: "$valor" } 
-          } 
-        },
-        { $sort: { total: -1 } } // Do maior gasto para o menor
+        { $match: { phone, tipo: "Gasto", data: { $gte: inicioMes } } },
+        { $group: { _id: "$categoria", total: { $sum: "$valor" } } },
+        { $sort: { total: -1 } }
       ]);
 
       const totaisGerais = await Finance.find({ phone, data: { $gte: inicioMes } });
-      let totalGastos = 0;
-      let totalReceitas = 0;
+      let totalGastos = 0, totalReceitas = 0;
       totaisGerais.forEach(r => r.tipo === "Gasto" ? totalGastos += r.valor : totalReceitas += r.valor);
 
-      let textoCategorias = resumoCategorias.length > 0 
-        ? resumoCategorias.map(c => `🔹 *${c._id}:* R$ ${c.total.toFixed(2)}`).join('\n')
-        : "Nenhum gasto detalhado ainda.";
+      let textoCategorias = resumoCategorias.map(c => `🔹 *${c._id}:* R$ ${c.total.toFixed(2)}`).join('\n') || "Sem gastos.";
 
-      finalReply = `📊 *RESUMO DETALHADO - ${inicioMes.toLocaleString('pt-BR', { month: 'long' }).toUpperCase()}*\n\n` +
-                   `📈 *POR CATEGORIA:*\n${textoCategorias}\n\n` +
-                   `--------------------------\n` +
-                   `🔴 Total Gastos: R$ ${totalGastos.toFixed(2)}\n` +
-                   `🟢 Total Receitas: R$ ${totalReceitas.toFixed(2)}\n\n` +
-                   `💰 *SALDO ATUAL: R$ ${(totalReceitas - totalGastos).toFixed(2)}*`;
+      await sendZap(phone, `📊 *RELATÓRIO DE ${user.name.toUpperCase()}*\n\n📈 *GASTOS POR CATEGORIA:*\n${textoCategorias}\n\n--------------------------\n🔴 Gastos: R$ ${totalGastos.toFixed(2)}\n🟢 Receitas: R$ ${totalReceitas.toFixed(2)}\n💰 *SALDO: R$ ${(totalReceitas - totalGastos).toFixed(2)}*`);
     } 
     
     else {
-      finalReply = data.resposta || "Como posso ajudar?";
+      await sendZap(phone, data.resposta || `Oi ${user.name}, como posso ajudar?`);
     }
-
-    await axios.post(
-      `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
-      { phone, message: finalReply },
-      { headers: { "Content-Type": "application/json", "client-token": ZAPI_CLIENT_TOKEN } }
-    );
 
   } catch (error) {
     console.log("Erro:", error.message);
@@ -121,4 +134,4 @@ app.post("/webhook", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor Ativo 🚀`));
+app.listen(PORT, () => console.log(`Servidor de Vendas Ativo 🚀`));
