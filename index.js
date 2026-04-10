@@ -53,7 +53,7 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       } else {
         await User.create({ phone, name: extractedName });
-        await sendZap(phone, `Bem-vindo, *${extractedName}*! 🎉\n\nJá pode anotar seus gastos. Quer definir uma meta de gastos para este mês? Digite: "Minha meta é 1000"`);
+        await sendZap(phone, `Bem-vindo, *${extractedName}*! 🎉\n\nJá pode anotar seus gastos. Quer definir uma meta? Digite: "Minha meta é 1000"`);
         return res.sendStatus(200);
       }
     }
@@ -65,7 +65,7 @@ app.post("/webhook", async (req, res) => {
         {
           role: "system",
           content: `Usuário: ${user.name}. Responda apenas o JSON:
-          1. Salvar: {"acao": "salvar", "tipo": "Gasto/Recebimento", "valor": 0, "categoria": "", "observacao": ""}
+          1. Salvar: {"acao": "salvar", "tipo": "Gasto/Recebimento", "valor": 0, "categoria": "Ex: Mercado, Lazer, Saúde", "observacao": ""}
           2. Resumo: {"acao": "resumo"}
           3. Apagar: {"acao": "apagar"}
           4. Meta: {"acao": "set_meta", "valor": 0}
@@ -75,25 +75,23 @@ app.post("/webhook", async (req, res) => {
       ], temperature: 0
     }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
 
-    let data = JSON.parse(response.data.choices[0].message.content.replace(/```json|```/g, "").trim());
+    let aiReply = response.data.choices[0].message.content.replace(/```json|```/g, "").trim();
+    let data = JSON.parse(aiReply);
 
     // --- LÓGICA DE AÇÕES ---
 
-    // AÇÃO: DEFINIR META
     if (data.acao === "set_meta") {
       user.metaMensal = data.valor;
       await user.save();
-      await sendZap(phone, `🎯 Meta de gastos definida: *R$ ${data.valor.toFixed(2)}*.\nVou te avisar quando você chegar perto!`);
+      await sendZap(phone, `🎯 Meta de gastos definida: *R$ ${data.valor.toFixed(2)}*.\nVou te avisar se chegar perto!`);
     }
 
-    // AÇÃO: APAGAR ÚLTIMO
     else if (data.acao === "apagar") {
       const ultimo = await Finance.findOneAndDelete({ phone }, { sort: { data: -1 } });
       if (ultimo) await sendZap(phone, `🗑️ Registro de *R$ ${ultimo.valor}* em *${ultimo.categoria}* foi removido.`);
-      else await sendZap(phone, "Não encontrei nenhum registro recente para apagar.");
+      else await sendZap(phone, "Não encontrei nada recente para apagar.");
     }
 
-    // AÇÃO: SALVAR E MONITORAR META
     else if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
       await Finance.create({ phone, tipo: data.tipo, categoria: data.categoria, valor: valorLimpo, observacao: data.observacao });
@@ -104,22 +102,30 @@ app.post("/webhook", async (req, res) => {
         const gastos = await Finance.find({ phone, tipo: "Gasto", data: { $gte: inicioMes } });
         const totalGasto = gastos.reduce((sum, item) => sum + item.valor, 0);
 
-        if (totalGasto >= user.metaMensal) avisoMeta = `\n\n⚠️ *ALERTA:* Você ultrapassou sua meta de R$ ${user.metaMensal}!`;
-        else if (totalGasto >= user.metaMensal * 0.8) avisoMeta = `\n\n🟡 *ATENÇÃO:* Você já atingiu 80% da sua meta (R$ ${totalGasto.toFixed(2)})!`;
+        if (totalGasto >= user.metaMensal) avisoMeta = `\n\n⚠️ *ALERTA:* Você estourou sua meta de R$ ${user.metaMensal}!`;
+        else if (totalGasto >= user.metaMensal * 0.8) avisoMeta = `\n\n🟡 *ATENÇÃO:* Você atingiu 80% da sua meta (R$ ${totalGasto.toFixed(2)})!`;
       }
-
-      await sendZap(phone, `✅ *Lançado!*\n💰 R$ ${valorLimpo.toFixed(2)}${avisoMeta}`);
+      await sendZap(phone, `✅ *Lançado!*\n💰 R$ ${valorLimpo.toFixed(2)} em *${data.categoria}*${avisoMeta}`);
     }
 
-    // AÇÃO: RESUMO
     else if (data.acao === "resumo") {
-        const inicioMes = new Date(); inicioMes.setDate(1); inicioMes.setHours(0,0,0,0);
-        const registros = await Finance.find({ phone, data: { $gte: inicioMes } });
-        let g = 0, r = 0;
-        registros.forEach(item => item.tipo === "Gasto" ? g += item.valor : r += item.valor);
-        
-        let statusMeta = user.metaMensal > 0 ? `\n🎯 Meta: R$ ${user.metaMensal.toFixed(2)} (${((g/user.metaMensal)*100).toFixed(0)}%)` : "";
-        await sendZap(phone, `📊 *RESUMO DO MÊS*${statusMeta}\n\n🔴 Gastos: R$ ${g.toFixed(2)}\n🟢 Receitas: R$ ${r.toFixed(2)}\n💰 *SALDO: R$ ${(r-g).toFixed(2)}*`);
+      const inicioMes = new Date(); inicioMes.setDate(1); inicioMes.setHours(0,0,0,0);
+
+      // Agrupamento por categoria (O que tinha sumido!)
+      const categorias = await Finance.aggregate([
+        { $match: { phone, tipo: "Gasto", data: { $gte: inicioMes } } },
+        { $group: { _id: "$categoria", total: { $sum: "$valor" } } },
+        { $sort: { total: -1 } }
+      ]);
+
+      const todos = await Finance.find({ phone, data: { $gte: inicioMes } });
+      let g = 0, r = 0;
+      todos.forEach(i => i.tipo === "Gasto" ? g += i.valor : r += i.valor);
+
+      let txtCat = categorias.map(c => `🔹 *${c._id}:* R$ ${c.total.toFixed(2)}`).join('\n') || "Sem gastos detalhados.";
+      let statusMeta = user.metaMensal > 0 ? `\n🎯 Meta: R$ ${user.metaMensal.toFixed(2)} (${((g/user.metaMensal)*100).toFixed(0)}%)` : "";
+
+      await sendZap(phone, `📊 *RESUMO DE ${user.name.toUpperCase()}*${statusMeta}\n\n📈 *POR CATEGORIA:*\n${txtCat}\n\n--------------------------\n🔴 Gastos: R$ ${g.toFixed(2)}\n🟢 Receitas: R$ ${r.toFixed(2)}\n💰 *SALDO: R$ ${(r-g).toFixed(2)}*`);
     }
 
     else { await sendZap(phone, data.resposta || "Como posso ajudar?"); }
@@ -128,4 +134,4 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(process.env.PORT || 3000);
+app.listen(process.env.PORT || 3000, () => console.log("Bot Premium On 🚀"));
