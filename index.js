@@ -2,8 +2,10 @@ require('dotenv').config();
 const express = require("express");
 const axios = require("axios");
 const mongoose = require("mongoose");
+const cors = require('cors'); 
 
-const app = express();
+const app = express(); // Primeiro criamos o app
+app.use(cors());       // Depois liberamos o CORS
 app.use(express.json());
 
 const { 
@@ -134,4 +136,16 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
+// Essa é a "porta" que o Lovable vai usar
+app.get("/api/transacoes", async (req, res) => {
+  try {
+    // Busca todas as finanças no banco e ordena pelas mais recentes
+    const transacoes = await Finance.find().sort({ data: -1 });
+    
+    // Entrega os dados para quem pediu (no caso, o Lovable)
+    res.json(transacoes);
+  } catch (error) {
+    res.status(500).json({ erro: "Erro ao buscar dados" });
+  }
+});
 app.listen(process.env.PORT || 3000, () => console.log("Bot Premium On 🚀"));
