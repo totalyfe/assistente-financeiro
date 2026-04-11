@@ -432,13 +432,14 @@ app.post("/webhook", async (req, res) => {
       await sendZap(phone, `🎯 Meta de gastos definida: *R$ ${data.valor.toFixed(2)}*.`);
     }
       else if (data.acao === "deletar_conta") {
-  const nomeConta = data.nome;
-  const conta = await Wallet.findOne({ phone, nome: nomeConta });
+  const nomeConta = data.nome; // ex: "NUBANK"
+  // Busca ignorando maiúsculas/minúsculas
+  const conta = await Wallet.findOne({ phone, nome: { $regex: new RegExp(`^${nomeConta}$`, 'i') } });
   if (!conta) {
     await sendZap(phone, `❌ Conta "${nomeConta}" não encontrada.`);
   } else {
-    await Wallet.deleteOne({ phone, nome: nomeConta });
-    await sendZap(phone, `🗑️ Conta *${nomeConta}* removida com sucesso.`);
+    await Wallet.deleteOne({ phone, nome: conta.nome }); // deleta com o nome exato do banco
+    await sendZap(phone, `🗑️ Conta *${conta.nome}* removida com sucesso.`);
   }
 }
     else if (data.acao === "apagar") {
