@@ -445,7 +445,13 @@ app.post("/webhook", async (req, res) => {
       "ITAU": "Itaú", "NUBANK": "Nubank", "NUBANK CREDITO": "Nubank Crédito",
       "INTER CREDITO": "Inter Crédito", "SANTANDER": "Santander", "BRADESCO": "Bradesco",
       "ITAU CREDITO": "Itaú Crédito", "BRADESCO CREDITO": "Bradesco Crédito",
-      "SANTANDER CREDITO": "Santander Crédito", "INTER": "Inter", "PIX": "Dinheiro"
+      "SANTANDER CREDITO": "Santander Crédito", "INTER": "Inter", "PIX": "Dinheiro",
+      "C6BANK": "C6 Bank", "C6 BANK": "C6 Bank", "C6 BANK CREDITO": "C6 Bank Crédito",
+      "C6BANK CREDITO": "C6 Bank Crédito", "MERCADO PAGO": "Mercado Pago",
+      "MERCADO PAGO CREDITO": "Mercado Pago Crédito", "PICPAY": "Picpay",
+      "PICPAY CREDITO": "Picpay Crédito", "BANCO DO BRASIL": "Banco do Brasil",
+      "BANCO DO BRASIL CREDITO": "Banco do Brasil Crédito", "CAIXA": "Caixa",
+      "SAFRA": "Safra", "SAFRA CREDITO": "Safra Crédito",
     };
 
     // --- AÇÕES ---
