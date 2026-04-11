@@ -29,7 +29,7 @@ const EMOJIS_CATEGORIAS = {
   "Pix": "💸", "Internet": "🛜", "Pet": "🐶", "Padaria": "🥖", "Assinaturas": "📺", "Outros": "📦" 
 };
 
-// --- TEXTOS DE AJUDA CENTRALIZADOS ---
+// --- TEXTOS DE AJUDA ---
 const HELP_TEXT = `━━━━━━━━━━━━━━━
 
 💸 *Lançamentos rápidos*
@@ -74,45 +74,31 @@ Uso *hoje automaticamente*
 - "mude meu saldo do nubank pra 2000"
 - "qual meu saldo?"
 
+💳 *Cartão de crédito parcelado*
+- "comprei [desc] no [cartão] em 3x de 140"
+- "pagar parcela da [desc]"
+- "definir fatura dia 15"
+
 ━━━━━━━━━━━━━━━
 
 💸 *Transferências*
 - "transferir 200 do nubank pro inter"
 
-━━━━━━━━━━━━━━━
-
 🔁 *Contas fixas (recorrentes)*
 - "todo mês 1000 aluguel dia 5"
-- "Academia 100 todo dia 10"
-
-━━━━━━━━━━━━━━━
 
 🎯 *Meta mensal de gastos*
 - "meta 2000"
 
-━━━━━━━━━━━━━━━
-
 🔔 *Alertas*
-- Criar/atualizar limites por categoria: "limite mercado 500"
-- Consultar limites: "meus limites"
-
-━━━━━━━━━━━━━━━
+- "limite mercado 500"
+- "meus limites"
 
 📈 *Relatórios*
 - Gráficos e relatórios no painel
 
-━━━━━━━━━━━━━━━
-
 🧠 *Análise inteligente*
 - "analisar"
-
-━━━━━━━━━━━━━━━
-
-💬 *Dica importante:*
-Fale comigo como falaria com uma pessoa 😄
-
-Ex:
-"paguei 30 no lanche ontem no débito"
 
 🚀 Bora começar? Me manda seu primeiro lançamento!
 
@@ -147,7 +133,9 @@ const Finance = mongoose.model("Finance", new mongoose.Schema({
 }));
 
 const User = mongoose.model("User", new mongoose.Schema({
-  phone: String, name: String, metaMensal: { type: Number, default: 0 }, createdAt: { type: Date, default: Date.now }
+  phone: String, name: String, metaMensal: { type: Number, default: 0 }, createdAt: { type: Date, default: Date.now },
+  diaFechamentoFatura: { type: Number, default: 10 }, // dia do mês
+  ultimoFechamento: { type: Date, default: null }
 }));
 
 const Recorrencia = mongoose.model("Recorrencia", new mongoose.Schema({
@@ -177,6 +165,20 @@ const Reminder = mongoose.model("Reminder", new mongoose.Schema({
   diasAntecedencia: { type: Number, default: 2 },
   enviado: { type: Boolean, default: false },
   ativo: { type: Boolean, default: true }
+}));
+
+// --- MODELO PARA PARCELAS ---
+const Parcela = mongoose.model("Parcela", new mongoose.Schema({
+  phone: String,
+  descricao: String,
+  valorTotal: Number,
+  valorParcela: Number,
+  totalParcelas: Number,
+  parcelasPagas: { type: Number, default: 0 },
+  dataProximaVencimento: Date,
+  categoria: String,
+  carteira: String, // nome da conta de crédito (ex: "Nubank Crédito")
+  ativa: { type: Boolean, default: true }
 }));
 
 // --- FUNÇÕES DE ENVIO ---
@@ -254,7 +256,38 @@ function interpretarRapido(message) {
     return { acao: "deletar_conta", nome: deletarContaMatch[1].trim().toUpperCase() };
   }
 
-  // GASTO
+  // COMPRA PARCELADA
+  const parceladoMatch = msg.match(/(?:comprei|fiz uma compra de)\s+(.+?)\s+(?:no|na|pelo)\s+([a-zà-ú\s]+(?: crédito)?)\s+em\s+(\d+)x\s+de\s+(\d+(?:[.,]\d{2})?)/i);
+  if (parceladoMatch) {
+    const descricao = parceladoMatch[1].trim();
+    const carteira = parceladoMatch[2].trim().toUpperCase();
+    const numParcelas = parseInt(parceladoMatch[3]);
+    let valorParcela = parseFloat(parceladoMatch[4].replace(',', '.'));
+    const valorTotal = numParcelas * valorParcela;
+    return {
+      acao: "compra_parcelada",
+      descricao: descricao,
+      carteira: carteira,
+      numParcelas: numParcelas,
+      valorParcela: valorParcela,
+      valorTotal: valorTotal,
+      categoria: detectarCategoria(descricao)
+    };
+  }
+
+  // PAGAR PARCELA
+  const pagarParcelaMatch = msg.match(/pagar\s+parcela\s+da\s+(.+)/i);
+  if (pagarParcelaMatch) {
+    return { acao: "pagar_parcela", descricao: pagarParcelaMatch[1].trim() };
+  }
+
+  // DEFINIR DIA DA FATURA
+  const faturaDiaMatch = msg.match(/definir\s+fatura\s+dia\s+(\d{1,2})/i);
+  if (faturaDiaMatch) {
+    return { acao: "set_fatura_dia", dia: parseInt(faturaDiaMatch[1]) };
+  }
+
+  // GASTO À VISTA (crédito ou débito)
   const gastoMatch = msg.match(/(gastei|paguei|comprei)\s+(\d+(?:[.,]\d{2})?)\s+(?:em\s+|no\s+|na\s+)?([a-zà-ú\s]+?)(?:\s+(?:no|na|pelo)\s+([a-z0-9à-ú\s]+))?$/i);
   if (gastoMatch) {
     let categoriaTexto = gastoMatch[3] ? gastoMatch[3].trim() : "Outros";
@@ -289,6 +322,15 @@ function interpretarRapido(message) {
       pago: true,
       recorrente: false
     };
+  }
+
+  // CRIAÇÃO/CONFIGURAÇÃO DE CONTA (ex: "nubank 1000", "nubank crédito 500")
+  const setWalletMatch = msg.match(/^([a-zà-ú\s]+(?: crédito)?)\s+(\d+(?:[.,]\d{2})?)$/i);
+  if (setWalletMatch) {
+    let nomeConta = setWalletMatch[1].trim();
+    let valor = parseFloat(setWalletMatch[2].replace(',', '.'));
+    if (isNaN(valor)) valor = 0;
+    return { acao: "set_wallet", nome: nomeConta, valor: valor };
   }
 
   // COMANDOS GERAIS
@@ -385,7 +427,7 @@ app.post("/webhook", async (req, res) => {
       const response = await axios.post("https://api.openai.com/v1/chat/completions", {
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: `Você é um assistente financeiro. Responda APENAS com JSON. Possíveis ações: salvar, resumo, apagar, set_meta, set_recorrente, set_wallet, ver_saldos, analisar, transferir, buscar, set_limite, meus_limites, criar_lembrete, ajuda. Para 'salvar', inclua tipo, valor, categoria, carteira, observacao, pago, recorrente, vencimento. Para 'buscar', termo pode ser 'TUDO' ou uma categoria.` },
+          { role: "system", content: `Você é um assistente financeiro. Responda APENAS com JSON. Possíveis ações: salvar, resumo, apagar, set_meta, set_recorrente, set_wallet, ver_saldos, analisar, transferir, buscar, set_limite, meus_limites, criar_lembrete, ajuda, compra_parcelada, pagar_parcela, set_fatura_dia. Para 'salvar', inclua tipo, valor, categoria, carteira, observacao, pago, recorrente, vencimento. Para 'buscar', termo pode ser 'TUDO' ou uma categoria.` },
           { role: "user", content: message }
         ],
         temperature: 0
@@ -412,6 +454,11 @@ app.post("/webhook", async (req, res) => {
       await user.save();
       await sendZap(phone, `🎯 Meta de gastos definida: *R$ ${data.valor.toFixed(2)}*.`);
     }
+    else if (data.acao === "set_fatura_dia") {
+      user.diaFechamentoFatura = data.dia;
+      await user.save();
+      await sendZap(phone, `📅 Dia de fechamento da fatura definido para o dia ${data.dia} de cada mês.`);
+    }
     else if (data.acao === "deletar_conta") {
       const nomeConta = data.nome;
       const conta = await Wallet.findOne({ phone, nome: { $regex: new RegExp(`^${nomeConta}$`, 'i') } });
@@ -421,6 +468,55 @@ app.post("/webhook", async (req, res) => {
         await Wallet.deleteOne({ phone, nome: conta.nome });
         await sendZap(phone, `🗑️ Conta *${conta.nome}* removida com sucesso.`);
       }
+    }
+    else if (data.acao === "compra_parcelada") {
+      const { descricao, carteira, numParcelas, valorParcela, valorTotal, categoria } = data;
+      let nomeCarteira = carteira.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+      const ehCredito = nomeCarteira.includes("CREDITO");
+      if (!ehCredito) {
+        await sendZap(phone, "⚠️ Compras parceladas só são permitidas em contas de crédito.");
+        return;
+      }
+      let baseNome = nomeCarteira.replace("CREDITO", "").trim();
+      let carteiraNome = nomesOficiais[baseNome] || baseNome;
+      carteiraNome += " Crédito";
+
+      let wallet = await Wallet.findOne({ phone, nome: carteiraNome });
+      if (!wallet) {
+        await sendZap(phone, `❌ Conta ${carteiraNome} não encontrada. Crie-a primeiro com "nubank crédito 0".`);
+        return;
+      }
+      if (wallet.saldo < valorTotal) {
+        await sendZap(phone, `⚠️ Limite insuficiente na conta ${carteiraNome}. Disponível: R$ ${wallet.saldo.toFixed(2)}.`);
+        return;
+      }
+      wallet.saldo -= valorTotal;
+      await wallet.save();
+
+      const dataPrimeiraVencimento = new Date();
+      dataPrimeiraVencimento.setDate(dataPrimeiraVencimento.getDate() + 30);
+      await Parcela.create({
+        phone, descricao, valorTotal, valorParcela, totalParcelas: numParcelas,
+        parcelasPagas: 0, dataProximaVencimento: dataPrimeiraVencimento,
+        categoria, carteira: carteiraNome, ativa: true
+      });
+
+      await sendZap(phone, `✅ *Compra parcelada registrada!*\n\n*${descricao}*\nTotal: R$ ${valorTotal.toFixed(2)} em ${numParcelas}x de R$ ${valorParcela.toFixed(2)}\nCarteira: ${carteiraNome}\nPrimeira parcela vence em ${dataPrimeiraVencimento.toLocaleDateString('pt-BR')}.\n\n⚠️ Lembre-se de pagar cada parcela mensalmente usando "pagar parcela ${descricao}".`);
+    }
+    else if (data.acao === "pagar_parcela") {
+      const descricao = data.descricao;
+      const parcela = await Parcela.findOne({ phone, descricao: { $regex: new RegExp(descricao, 'i') }, ativa: true });
+      if (!parcela) {
+        await sendZap(phone, `❌ Não encontrei parcela pendente para "${descricao}".`);
+        return;
+      }
+      if (parcela.parcelasPagas >= parcela.totalParcelas) {
+        await sendZap(phone, `✅ Todas as parcelas de "${parcela.descricao}" já foram pagas.`);
+        return;
+      }
+      const valorParcela = parcela.valorParcela;
+      await sendZap(phone, `💳 Para pagar a parcela ${parcela.parcelasPagas+1}/${parcela.totalParcelas} de R$ ${valorParcela.toFixed(2)} da compra "${parcela.descricao}", transfira esse valor da sua conta débito para a conta ${parcela.carteira} usando:\n\n"transferir ${valorParcela.toFixed(2)} do [sua_conta] para ${parcela.carteira}"\n\nApós a transferência, me avise "parcela paga ${descricao}" para eu atualizar.`);
+      // Para automatizar, poderíamos receber confirmação, mas por ora orientamos.
     }
     else if (data.acao === "apagar") {
       let excluido;
@@ -457,17 +553,25 @@ app.post("/webhook", async (req, res) => {
     }
     else if (data.acao === "set_wallet") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
-      let nomeEntrada = data.nome.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-      let nomeFinal = nomesOficiais[nomeEntrada] || nomeEntrada;
-      if (!nomesOficiais[nomeEntrada]) {
-        await sendZap(phone, `⚠️ "${data.nome}" não é um banco reconhecido. Use nomes como Nubank, Itaú, etc. Conta não criada.`);
+      let nomeOriginal = data.nome.trim();
+      let nomeNormalizado = nomeOriginal.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+      const ehCredito = nomeNormalizado.includes("CREDITO");
+      let nomeBase = ehCredito ? nomeNormalizado.replace("CREDITO", "").trim() : nomeNormalizado;
+      let nomeFinal = nomesOficiais[nomeBase];
+      if (!nomeFinal) {
+        await sendZap(phone, `⚠️ "${nomeOriginal}" não é um banco reconhecido. Use nomes como Nubank, Itaú, etc. Conta não criada.`);
         return;
       }
+      if (ehCredito) nomeFinal += " Crédito";
       const count = await Wallet.countDocuments({ phone });
       if (count >= 3 && !(await Wallet.findOne({ phone, nome: nomeFinal }))) {
         await sendZap(phone, "⚠️ Limite de 3 contas bancárias atingido. Remova uma antes de adicionar outra.");
       } else {
-        await Wallet.findOneAndUpdate({ phone, nome: nomeFinal }, { saldo: valorLimpo }, { upsert: true, new: true });
+        await Wallet.findOneAndUpdate(
+          { phone, nome: nomeFinal },
+          { saldo: valorLimpo, tipo: ehCredito ? "Crédito" : "Corrente" },
+          { upsert: true, new: true }
+        );
         await sendZap(phone, `🏦 Conta *${nomeFinal}* configurada com R$ ${valorLimpo.toFixed(2)}.`);
       }
     }
@@ -490,6 +594,27 @@ app.post("/webhook", async (req, res) => {
       await Wallet.findOneAndUpdate({ phone, nome: nomeDestino }, { $inc: { saldo: valorLimpo }, upsert: true });
       await Finance.create({ phone, idCurto: nanoid(6), tipo: "Transferência", categoria: "Transferência", valor: valorLimpo, observacao: `Pix: ${nomeOrigem} ➔ ${nomeDestino}` });
       await sendZap(phone, `💸 *Transferência concluída!*\n\nSaída: *${nomeOrigem}*\nEntrada: *${nomeDestino}*\nValor: R$ ${valorLimpo.toFixed(2)}`);
+      
+      // Verificar se a transferência foi para uma conta de crédito (pagamento de parcela/fatura)
+      const contaDestino = await Wallet.findOne({ phone, nome: nomeDestino });
+      if (contaDestino && contaDestino.tipo === "Crédito") {
+        // Tentar encontrar parcela pendente para abater
+        const parcela = await Parcela.findOne({ phone, carteira: nomeDestino, ativa: true, parcelasPagas: { $lt: "$totalParcelas" } }).sort({ dataProximaVencimento: 1 });
+        if (parcela) {
+          parcela.parcelasPagas += 1;
+          if (parcela.parcelasPagas >= parcela.totalParcelas) {
+            parcela.ativa = false;
+            await sendZap(phone, `🎉 Parabéns! Você quitou todas as parcelas de "${parcela.descricao}".`);
+          } else {
+            // Atualizar próxima data de vencimento +30 dias
+            const novaData = new Date();
+            novaData.setDate(novaData.getDate() + 30);
+            parcela.dataProximaVencimento = novaData;
+            await sendZap(phone, `✅ Parcela ${parcela.parcelasPagas}/${parcela.totalParcelas} da compra "${parcela.descricao}" foi paga. Próxima parcela vence em ${novaData.toLocaleDateString('pt-BR')}.`);
+          }
+          await parcela.save();
+        }
+      }
     }
     else if (data.acao === "buscar") {
       const termo = data.termo;
@@ -568,7 +693,6 @@ app.post("/webhook", async (req, res) => {
       const ehCredito = carteiraNormalizada.includes("CREDITO");
       let nomeEntrada = data.carteira ? data.carteira.toUpperCase().trim() : "DINHEIRO";
       
-      // VALIDAÇÃO: só cria carteira se for banco conhecido
       let carteiraNome;
       if (carteiraNormalizada && nomesOficiais[carteiraNormalizada]) {
         carteiraNome = nomesOficiais[carteiraNormalizada];
@@ -642,7 +766,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// --- ROTAS DA API ---
+// --- ROTAS DA API PROTEGIDAS ---
 function authMiddleware(req, res, next) {
   const token = req.query.token || req.headers['x-api-token'];
   if (!API_SECRET_TOKEN || token === API_SECRET_TOKEN) return next();
@@ -663,14 +787,15 @@ app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
   res.json({ msg: "Funcionalidade OFX em breve" });
 });
 
-// --- CRON JOB ---
+// --- CRON JOB (recorrências, lembretes, parcelas e fatura) ---
 cron.schedule('0 * * * *', async () => {
-  console.log("Processando recorrências e lembretes...");
+  console.log("Processando tarefas agendadas...");
   const hoje = new Date();
   const dia = hoje.getDate();
   const inicioHoje = new Date(); inicioHoje.setHours(0,0,0,0);
   const fimHoje = new Date(); fimHoje.setHours(23,59,59,999);
 
+  // Recorrências
   const contasHoje = await Recorrencia.find({ diaVencimento: dia, ativa: true });
   for (const conta of contasHoje) {
     const jaLancado = await Finance.findOne({ phone: conta.phone, categoria: conta.categoria, valor: conta.valor, data: { $gte: inicioHoje, $lte: fimHoje } });
@@ -683,6 +808,7 @@ cron.schedule('0 * * * *', async () => {
     }
   }
 
+  // Lembretes antecipados
   const amanha = new Date(); amanha.setDate(hoje.getDate() + 1);
   const proximosDias = [hoje, amanha];
   for (const diaRef of proximosDias) {
@@ -694,6 +820,46 @@ cron.schedule('0 * * * *', async () => {
         if (diffDias === 0) lembrete.enviado = true;
         await lembrete.save();
       }
+    }
+  }
+
+  // Parcelas vencendo hoje
+  const parcelasVencendo = await Parcela.find({ dataProximaVencimento: { $lte: hoje }, ativa: true });
+  for (const parcela of parcelasVencendo) {
+    if (parcela.parcelasPagas < parcela.totalParcelas) {
+      await sendZap(parcela.phone, `🔔 *PARCELA VENCE HOJE*: ${parcela.descricao} - ${parcela.parcelasPagas+1}/${parcela.totalParcelas} - Valor: R$ ${parcela.valorParcela.toFixed(2)}.\nPague com "transferir ${parcela.valorParcela} do [debito] para ${parcela.carteira}".`);
+    }
+  }
+
+  // Fatura consolidada (dia de fechamento)
+  const users = await User.find({ diaFechamentoFatura: { $exists: true } });
+  for (const user of users) {
+    if (hoje.getDate() === user.diaFechamentoFatura) {
+      let inicioPeriodo = user.ultimoFechamento || new Date(hoje.getFullYear(), hoje.getMonth()-1, user.diaFechamentoFatura);
+      if (!user.ultimoFechamento) inicioPeriodo = new Date(hoje.getFullYear(), hoje.getMonth()-1, user.diaFechamentoFatura);
+      const fimPeriodo = hoje;
+      // Somar parcelas que venceram no período (considerando dataProximaVencimento dentro do período)
+      const parcelasPeriodo = await Parcela.find({
+        phone: user.phone,
+        dataProximaVencimento: { $gte: inicioPeriodo, $lte: fimPeriodo },
+        ativa: true
+      });
+      let totalFatura = 0;
+      for (const p of parcelasPeriodo) {
+        totalFatura += p.valorParcela;
+      }
+      // Poderia somar também compras à vista no crédito no período (Finance com tipo Gasto e carteira crédito)
+      const comprasAvista = await Finance.find({
+        phone: user.phone,
+        tipo: "Gasto",
+        data: { $gte: inicioPeriodo, $lte: fimPeriodo },
+        observacao: { $regex: /Crédito/i }
+      });
+      for (const c of comprasAvista) totalFatura += c.valor;
+      
+      await sendZap(user.phone, `💳 *FATURA DO CARTÃO* - Período: ${inicioPeriodo.toLocaleDateString()} a ${fimPeriodo.toLocaleDateString()}\nValor total: R$ ${totalFatura.toFixed(2)}\nVencimento: aproximadamente dia ${user.diaFechamentoFatura+5}.\nPara pagar, use "transferir ${totalFatura.toFixed(2)} do [conta_debito] para [conta_credito]".`);
+      user.ultimoFechamento = hoje;
+      await user.save();
     }
   }
 });
