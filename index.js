@@ -258,7 +258,13 @@ function detectarCategoria(msg) {
 function interpretarRapido(message) {
   const msg = message.toLowerCase();
 
-  // GASTO: captura "gastei 50,50 no mercado no nubank"
+  // 1. DETECTAR "DELETAR CONTA"
+  const deletarContaMatch = msg.match(/deletar\s+conta\s+(.+)/i);
+  if (deletarContaMatch) {
+    return { acao: "deletar_conta", nome: deletarContaMatch[1].trim().toUpperCase() };
+  }
+
+  // 2. GASTO (gastei, paguei, comprei)
   const gastoMatch = msg.match(/(gastei|paguei|comprei)\s+(\d+(?:[.,]\d{2})?)\s+(?:em\s+|no\s+|na\s+)?([a-zà-ú\s]+?)(?:\s+(?:no|na|pelo)\s+([a-z0-9à-ú\s]+))?$/i);
   if (gastoMatch) {
     let categoriaTexto = gastoMatch[3] ? gastoMatch[3].trim() : "Outros";
@@ -425,6 +431,16 @@ app.post("/webhook", async (req, res) => {
       await user.save();
       await sendZap(phone, `🎯 Meta de gastos definida: *R$ ${data.valor.toFixed(2)}*.`);
     }
+      else if (data.acao === "deletar_conta") {
+  const nomeConta = data.nome;
+  const conta = await Wallet.findOne({ phone, nome: nomeConta });
+  if (!conta) {
+    await sendZap(phone, `❌ Conta "${nomeConta}" não encontrada.`);
+  } else {
+    await Wallet.deleteOne({ phone, nome: nomeConta });
+    await sendZap(phone, `🗑️ Conta *${nomeConta}* removida com sucesso.`);
+  }
+}
     else if (data.acao === "apagar") {
       let excluido;
       if (data.idCurto) {
