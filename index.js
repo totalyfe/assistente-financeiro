@@ -7,7 +7,6 @@ const fs = require('fs');
 const FormData = require('form-data');
 const { nanoid } = require('nanoid');
 const cron = require('node-cron');
-const PDFDocument = require('pdfkit'); // opcional, pode usar puppeteer
 
 const app = express();
 app.use(cors());
@@ -17,7 +16,6 @@ const {
   OPENAI_API_KEY, ZAPI_TOKEN, ZAPI_INSTANCE, MONGODB_URI, ZAPI_CLIENT_TOKEN, API_SECRET_TOKEN 
 } = process.env;
 
-// Validação de token para rotas internas
 if (!API_SECRET_TOKEN) console.warn("⚠️ API_SECRET_TOKEN não definido. Rotas da API estarão desprotegidas.");
 
 mongoose.connect(MONGODB_URI)
@@ -132,12 +130,12 @@ const Wallet = mongoose.model("Wallet", new mongoose.Schema({
   nome: { type: String, required: true },
   tipo: { type: String, enum: ["Corrente", "Crédito"], default: "Corrente" },
   saldo: { type: Number, default: 0 },
-  limite: { type: Number, default: 0 } // limite de crédito (opcional)
+  limite: { type: Number, default: 0 }
 }));
 
 const Finance = mongoose.model("Finance", new mongoose.Schema({
   phone: String, 
-  idCurto: { type: String, unique: true }, // agora com nanoid garantido único
+  idCurto: { type: String, unique: true },
   tipo: String, 
   categoria: String, 
   valor: Number, 
@@ -163,15 +161,13 @@ const Recorrencia = mongoose.model("Recorrencia", new mongoose.Schema({
   ativa: { type: Boolean, default: true }
 }));
 
-// --- MODELO PARA LIMITES POR CATEGORIA ---
 const CategoryLimit = mongoose.model("CategoryLimit", new mongoose.Schema({
   phone: String,
   categoria: String,
   limiteMensal: Number,
-  mesReferencia: { type: String, default: () => new Date().toISOString().slice(0,7) } // YYYY-MM
+  mesReferencia: { type: String, default: () => new Date().toISOString().slice(0,7) }
 }));
 
-// --- MODELO PARA LEMBRETES ANTECIPADOS ---
 const Reminder = mongoose.model("Reminder", new mongoose.Schema({
   phone: String,
   descricao: String,
@@ -183,7 +179,7 @@ const Reminder = mongoose.model("Reminder", new mongoose.Schema({
   ativo: { type: Boolean, default: true }
 }));
 
-// --- FUNÇÕES DE ENVIO COM TRATAMENTO DE ERRO ---
+// --- FUNÇÕES DE ENVIO ---
 async function sendZap(phone, message) {
   try {
     await axios.post(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`, 
@@ -213,18 +209,15 @@ async function sendZapMenu(phone, message) {
   }
 }
 
-// --- FUNÇÃO DE LIMPEZA DE ÁUDIO GARANTIDA ---
 async function transcreverAudio(audioUrl, phone) {
   let fileName = null;
   try {
     const audioResponse = await axios.get(audioUrl, { responseType: 'arraybuffer' });
     fileName = `./${phone}_${Date.now()}.ogg`;
     fs.writeFileSync(fileName, Buffer.from(audioResponse.data));
-
     const formData = new FormData();
     formData.append('file', fs.createReadStream(fileName));
     formData.append('model', 'whisper-1');
-
     const transcription = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
       headers: { ...formData.getHeaders(), Authorization: `Bearer ${OPENAI_API_KEY}` }
     });
@@ -233,13 +226,10 @@ async function transcreverAudio(audioUrl, phone) {
     console.log("Erro áudio:", err.message);
     throw new Error("Não foi possível transcrever o áudio.");
   } finally {
-    if (fileName && fs.existsSync(fileName)) {
-      fs.unlinkSync(fileName);
-    }
+    if (fileName && fs.existsSync(fileName)) fs.unlinkSync(fileName);
   }
 }
 
-// --- DETECÇÃO RÁPIDA MELHORADA ---
 function detectarCategoria(msg) {
   const m = msg.toLowerCase();
   if (m.includes("mercado")) return "Mercado";
@@ -258,18 +248,17 @@ function detectarCategoria(msg) {
 function interpretarRapido(message) {
   const msg = message.toLowerCase();
 
-  // 1. DETECTAR "DELETAR CONTA"
+  // DELETAR CONTA
   const deletarContaMatch = msg.match(/deletar\s+conta\s+(.+)/i);
   if (deletarContaMatch) {
     return { acao: "deletar_conta", nome: deletarContaMatch[1].trim().toUpperCase() };
   }
 
-  // 2. GASTO (gastei, paguei, comprei)
+  // GASTO
   const gastoMatch = msg.match(/(gastei|paguei|comprei)\s+(\d+(?:[.,]\d{2})?)\s+(?:em\s+|no\s+|na\s+)?([a-zà-ú\s]+?)(?:\s+(?:no|na|pelo)\s+([a-z0-9à-ú\s]+))?$/i);
   if (gastoMatch) {
     let categoriaTexto = gastoMatch[3] ? gastoMatch[3].trim() : "Outros";
     let carteiraDetectada = gastoMatch[4] ? gastoMatch[4].toUpperCase().trim() : null;
-
     const bancos = ["nubank", "inter", "itau", "bradesco", "santander", "caixa", "credito", "cartao"];
     if (!carteiraDetectada && bancos.some(b => categoriaTexto.toLowerCase().includes(b))) {
       carteiraDetectada = categoriaTexto.toUpperCase();
@@ -305,20 +294,16 @@ function interpretarRapido(message) {
   // COMANDOS GERAIS
   if (msg.includes("painel")) return { acao: "painel" };
   if (msg.match(/(funções|funcoes|ajuda|help|menu|o que você faz)/i)) return { acao: "ajuda" };
-
   const metaMatch = msg.match(/meta\s+(\d+(?:[.,]\d{2})?)/i);
   if (metaMatch) return { acao: "set_meta", valor: Number(metaMatch[1].replace(',', '.')) };
-
   if (msg.includes("gastos") || msg.includes("compras")) return { acao: "buscar", termo: "TUDO" };
   if (msg.match(/(resumo|relatorio|relatório)/i)) return { acao: "resumo" };
   if (msg.includes("saldo")) return { acao: "ver_saldos" };
-  if (msg.match(/limite\s+([a-zà-ú]+)\s+(\d+(?:[.,]\d{2})?)/i)) {
-    const limiteMatch = msg.match(/limite\s+([a-zà-ú]+)\s+(\d+(?:[.,]\d{2})?)/i);
-    return { acao: "set_limite", categoria: limiteMatch[1], valor: parseFloat(limiteMatch[2].replace(',', '.')) };
-  }
+  const limiteMatch = msg.match(/limite\s+([a-zà-ú]+)\s+(\d+(?:[.,]\d{2})?)/i);
+  if (limiteMatch) return { acao: "set_limite", categoria: limiteMatch[1], valor: parseFloat(limiteMatch[2].replace(',', '.')) };
   if (msg.includes("meus limites")) return { acao: "meus_limites" };
-  if (msg.match(/(lembrar|lembrete)\s+(pagar|receber)\s+(.+)\s+dia\s+(\d{1,2})\/(\d{1,2})\s+valor\s+(\d+(?:[.,]\d{2})?)/i)) {
-    const lembreteMatch = msg.match(/(lembrar|lembrete)\s+(pagar|receber)\s+(.+)\s+dia\s+(\d{1,2})\/(\d{1,2})\s+valor\s+(\d+(?:[.,]\d{2})?)/i);
+  const lembreteMatch = msg.match(/(lembrar|lembrete)\s+(pagar|receber)\s+(.+)\s+dia\s+(\d{1,2})\/(\d{1,2})\s+valor\s+(\d+(?:[.,]\d{2})?)/i);
+  if (lembreteMatch) {
     return {
       acao: "criar_lembrete",
       tipo: lembreteMatch[2],
@@ -328,16 +313,14 @@ function interpretarRapido(message) {
       valor: parseFloat(lembreteMatch[6].replace(',', '.'))
     };
   }
-
   if (msg.match(/(excluir|apagar|deletar)/i)) {
     if (msg.match(/(ultima|última)/i)) return { acao: "apagar" };
-    const idMatch = msg.match(/([A-Z0-9]{6})/i); // nanoid tem 6 caracteres
+    const idMatch = msg.match(/([A-Z0-9]{6})/i);
     return { acao: "apagar", idCurto: idMatch ? idMatch[1].toUpperCase() : null };
   }
   return null;
 }
 
-// --- FUNÇÃO PARA VERIFICAR E ALERTAR LIMITES ---
 async function verificarLimiteCategoria(phone, categoria, valorGasto) {
   const inicioMes = new Date(); inicioMes.setDate(1); inicioMes.setHours(0,0,0,0);
   const gastosMes = await Finance.aggregate([
@@ -382,7 +365,6 @@ app.post("/webhook", async (req, res) => {
   try {
     let user = await User.findOne({ phone });
     if (!user) {
-      // Extração de nome via IA
       const nameResponse = await axios.post("https://api.openai.com/v1/chat/completions", {
         model: "gpt-4o-mini",
         messages: [{ role: "system", content: "Extraia o nome. Se não houver, responda 'PEDIR'." }, { role: "user", content: message }]
@@ -400,7 +382,6 @@ app.post("/webhook", async (req, res) => {
 
     let data = interpretarRapido(message);
     if (!data) {
-      // IA simplificada (prompt mais enxuto)
       const response = await axios.post("https://api.openai.com/v1/chat/completions", {
         model: "gpt-4o-mini",
         messages: [
@@ -431,17 +412,16 @@ app.post("/webhook", async (req, res) => {
       await user.save();
       await sendZap(phone, `🎯 Meta de gastos definida: *R$ ${data.valor.toFixed(2)}*.`);
     }
-      else if (data.acao === "deletar_conta") {
-  const nomeConta = data.nome; // ex: "NUBANK"
-  // Busca ignorando maiúsculas/minúsculas
-  const conta = await Wallet.findOne({ phone, nome: { $regex: new RegExp(`^${nomeConta}$`, 'i') } });
-  if (!conta) {
-    await sendZap(phone, `❌ Conta "${nomeConta}" não encontrada.`);
-  } else {
-    await Wallet.deleteOne({ phone, nome: conta.nome }); // deleta com o nome exato do banco
-    await sendZap(phone, `🗑️ Conta *${conta.nome}* removida com sucesso.`);
-  }
-}
+    else if (data.acao === "deletar_conta") {
+      const nomeConta = data.nome;
+      const conta = await Wallet.findOne({ phone, nome: { $regex: new RegExp(`^${nomeConta}$`, 'i') } });
+      if (!conta) {
+        await sendZap(phone, `❌ Conta "${nomeConta}" não encontrada.`);
+      } else {
+        await Wallet.deleteOne({ phone, nome: conta.nome });
+        await sendZap(phone, `🗑️ Conta *${conta.nome}* removida com sucesso.`);
+      }
+    }
     else if (data.acao === "apagar") {
       let excluido;
       if (data.idCurto) {
@@ -470,14 +450,19 @@ app.post("/webhook", async (req, res) => {
     else if (data.acao === "set_recorrente") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
       const nomeEntrada = data.carteira ? data.carteira.toUpperCase().trim() : "DINHEIRO";
-      const carteiraFinal = nomesOficiais[nomeEntrada] || nomeEntrada;
+      let carteiraFinal = nomesOficiais[nomeEntrada] || nomeEntrada;
+      if (!nomesOficiais[nomeEntrada]) carteiraFinal = "Dinheiro";
       await Recorrencia.create({ phone, tipo: data.tipo || "Gasto", valor: valorLimpo, categoria: data.categoria, diaVencimento: data.dia, descricao: data.observacao, carteira: carteiraFinal });
       await sendZap(phone, `📌 *Agendado!* Todo dia ${data.dia} no *${carteiraFinal}*.`);
     }
     else if (data.acao === "set_wallet") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
-      const nomeEntrada = data.nome.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-      const nomeFinal = nomesOficiais[nomeEntrada] || nomeEntrada;
+      let nomeEntrada = data.nome.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+      let nomeFinal = nomesOficiais[nomeEntrada] || nomeEntrada;
+      if (!nomesOficiais[nomeEntrada]) {
+        await sendZap(phone, `⚠️ "${data.nome}" não é um banco reconhecido. Use nomes como Nubank, Itaú, etc. Conta não criada.`);
+        return;
+      }
       const count = await Wallet.countDocuments({ phone });
       if (count >= 3 && !(await Wallet.findOne({ phone, nome: nomeFinal }))) {
         await sendZap(phone, "⚠️ Limite de 3 contas bancárias atingido. Remova uma antes de adicionar outra.");
@@ -579,17 +564,26 @@ app.post("/webhook", async (req, res) => {
     }
     else if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
-      const carteiraNormalizada = data.carteira ? data.carteira.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim() : "";
+      let carteiraNormalizada = data.carteira ? data.carteira.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim() : "";
       const ehCredito = carteiraNormalizada.includes("CREDITO");
-      const nomeEntrada = data.carteira ? data.carteira.toUpperCase().trim() : "DINHEIRO";
-      const carteiraNome = nomesOficiais[carteiraNormalizada] || nomeEntrada;
+      let nomeEntrada = data.carteira ? data.carteira.toUpperCase().trim() : "DINHEIRO";
       
-      // Validação de limite de contas (apenas se for criar uma nova)
+      // VALIDAÇÃO: só cria carteira se for banco conhecido
+      let carteiraNome;
+      if (carteiraNormalizada && nomesOficiais[carteiraNormalizada]) {
+        carteiraNome = nomesOficiais[carteiraNormalizada];
+      } else if (carteiraNormalizada && nomesOficiais[carteiraNormalizada.replace("CREDITO", "").trim()]) {
+        let base = carteiraNormalizada.replace("CREDITO", "").trim();
+        carteiraNome = nomesOficiais[base] + (ehCredito ? " Crédito" : "");
+      } else {
+        carteiraNome = "Dinheiro";
+      }
+      
       const walletExists = await Wallet.findOne({ phone, nome: carteiraNome });
-      if (!walletExists) {
+      if (!walletExists && carteiraNome !== "Dinheiro") {
         const count = await Wallet.countDocuments({ phone });
         if (count >= 3) {
-          await sendZap(phone, "⚠️ Você já tem 3 contas. Não é possível adicionar mais. Use 'excluir conta' se necessário.");
+          await sendZap(phone, "⚠️ Você já tem 3 contas. Não é possível adicionar mais. Use 'deletar conta' se necessário.");
           return;
         }
       }
@@ -613,7 +607,6 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // Verificar limites da categoria (após salvar)
       if (data.tipo === "Gasto") {
         await verificarLimiteCategoria(phone, data.categoria, valorLimpo);
       }
@@ -649,7 +642,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// --- ROTAS DA API PROTEGIDAS ---
+// --- ROTAS DA API ---
 function authMiddleware(req, res, next) {
   const token = req.query.token || req.headers['x-api-token'];
   if (!API_SECRET_TOKEN || token === API_SECRET_TOKEN) return next();
@@ -666,21 +659,18 @@ app.get("/api/transacoes/:phone", authMiddleware, async (req, res) => {
   }
 });
 
-// Endpoint de importação OFX (esqueleto)
 app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
-  // Implementar com multer e ofx-js
   res.json({ msg: "Funcionalidade OFX em breve" });
 });
 
-// --- CRON JOB PARA RECORRÊNCIAS E LEMBRETES ---
-cron.schedule('0 * * * *', async () => { // a cada hora
+// --- CRON JOB ---
+cron.schedule('0 * * * *', async () => {
   console.log("Processando recorrências e lembretes...");
   const hoje = new Date();
   const dia = hoje.getDate();
   const inicioHoje = new Date(); inicioHoje.setHours(0,0,0,0);
   const fimHoje = new Date(); fimHoje.setHours(23,59,59,999);
 
-  // Recorrências
   const contasHoje = await Recorrencia.find({ diaVencimento: dia, ativa: true });
   for (const conta of contasHoje) {
     const jaLancado = await Finance.findOne({ phone: conta.phone, categoria: conta.categoria, valor: conta.valor, data: { $gte: inicioHoje, $lte: fimHoje } });
@@ -693,7 +683,6 @@ cron.schedule('0 * * * *', async () => { // a cada hora
     }
   }
 
-  // Lembretes antecipados
   const amanha = new Date(); amanha.setDate(hoje.getDate() + 1);
   const proximosDias = [hoje, amanha];
   for (const diaRef of proximosDias) {
@@ -709,6 +698,5 @@ cron.schedule('0 * * * *', async () => { // a cada hora
   }
 });
 
-// --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Bot Zeca do Caixa rodando na porta ${PORT} 🚀`));
