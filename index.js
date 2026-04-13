@@ -181,6 +181,15 @@ const Parcela = mongoose.model("Parcela", new mongoose.Schema({
   ativa: { type: Boolean, default: true }
 }));
 
+// --- NOVO MODELO PARA CATEGORIAS PERSONALIZADAS (COM SUB CATEGORIAS) ---
+const Categoria = mongoose.model("Categoria", new mongoose.Schema({
+  phone: String,
+  nome: { type: String, required: true },
+  parent: { type: mongoose.Schema.Types.ObjectId, ref: "Categoria" }, // null = categoria principal
+  icone: { type: String, default: "📦" },
+  ativa: { type: Boolean, default: true }
+}));
+
 // --- FUNÇÕES DE ENVIO ---
 async function sendZap(phone, message) {
   try {
@@ -791,6 +800,126 @@ app.get("/api/transacoes/:phone", authMiddleware, async (req, res) => {
 
 app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
   res.json({ msg: "Funcionalidade OFX em breve" });
+});
+
+// ================= NOVAS ROTAS PARA O PAINEL LOVABLE =================
+
+// --- CONTAS BANCÁRIAS (WALLETS) ---
+app.get("/api/wallets/:phone", authMiddleware, async (req, res) => {
+  try {
+    const wallets = await Wallet.find({ phone: req.params.phone });
+    res.json(wallets);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.post("/api/wallets", authMiddleware, async (req, res) => {
+  try {
+    const { phone, nome, tipo, saldo, limite } = req.body;
+    // Verifica limite de 3 contas
+    const count = await Wallet.countDocuments({ phone });
+    if (count >= 3 && !(await Wallet.findOne({ phone, nome }))) {
+      return res.status(400).json({ erro: "Limite de 3 contas atingido" });
+    }
+    const wallet = await Wallet.findOneAndUpdate(
+      { phone, nome },
+      { tipo, saldo, limite },
+      { upsert: true, new: true }
+    );
+    res.json(wallet);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.delete("/api/wallets/:phone/:nome", authMiddleware, async (req, res) => {
+  try {
+    const { phone, nome } = req.params;
+    const result = await Wallet.deleteOne({ phone, nome: decodeURIComponent(nome) });
+    res.json({ deleted: result.deletedCount });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// --- CATEGORIAS PERSONALIZADAS ---
+app.get("/api/categorias/:phone", authMiddleware, async (req, res) => {
+  try {
+    const categorias = await Categoria.find({ phone: req.params.phone }).populate('parent');
+    res.json(categorias);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.post("/api/categorias", authMiddleware, async (req, res) => {
+  try {
+    const { phone, nome, parentId, icone } = req.body;
+    const categoria = await Categoria.create({ phone, nome, parent: parentId || null, icone: icone || "📦" });
+    res.json(categoria);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.put("/api/categorias/:id", authMiddleware, async (req, res) => {
+  try {
+    const { nome, parentId, icone, ativa } = req.body;
+    const categoria = await Categoria.findByIdAndUpdate(
+      req.params.id,
+      { nome, parent: parentId || null, icone, ativa },
+      { new: true }
+    );
+    res.json(categoria);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.delete("/api/categorias/:id", authMiddleware, async (req, res) => {
+  try {
+    await Categoria.findByIdAndDelete(req.params.id);
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// --- LIMITES (GERAL E POR CATEGORIA) ---
+app.get("/api/limites/:phone", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.params.phone });
+    const limitesCategoria = await CategoryLimit.find({ phone: req.params.phone, mesReferencia: new Date().toISOString().slice(0,7) });
+    res.json({ metaMensal: user?.metaMensal || 0, categorias: limitesCategoria });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.post("/api/limites/geral", authMiddleware, async (req, res) => {
+  try {
+    const { phone, valor } = req.body;
+    const user = await User.findOneAndUpdate({ phone }, { metaMensal: valor }, { upsert: true, new: true });
+    res.json({ metaMensal: user.metaMensal });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.post("/api/limites/categoria", authMiddleware, async (req, res) => {
+  try {
+    const { phone, categoria, limiteMensal } = req.body;
+    const mesRef = new Date().toISOString().slice(0,7);
+    const limite = await CategoryLimit.findOneAndUpdate(
+      { phone, categoria, mesReferencia: mesRef },
+      { limiteMensal },
+      { upsert: true, new: true }
+    );
+    res.json(limite);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
 });
 
 // --- CRON JOB (recorrências, lembretes, parcelas e fatura) ---
