@@ -426,8 +426,9 @@ app.post("/webhook", async (req, res) => {
         return;
       } else {
         await User.create({ phone, name: extractedName });
-        await sendZapMenu(phone, WELCOME_TEXT.replace("%nome%", extractedName));
-        return;
+        await criarCategoriasPadrao(phone);
+  await sendZapMenu(phone, WELCOME_TEXT.replace("%nome%", extractedName));
+  return;
       }
     }
 
@@ -998,6 +999,37 @@ cron.schedule('0 * * * *', async () => {
     }
   }
 });
+
+// ========== POPULAR CATEGORIAS PADRÃO PARA USUÁRIOS EXISTENTES ==========
+async function criarCategoriasPadrao(phone) {
+  const count = await Categoria.countDocuments({ phone });
+  if (count === 0) {
+    const categoriasPadrao = Object.keys(EMOJIS_CATEGORIAS).map(nome => ({
+      phone,
+      nome,
+      icone: EMOJIS_CATEGORIAS[nome],
+      ativa: true,
+      parent: null
+    }));
+    await Categoria.insertMany(categoriasPadrao);
+    console.log(`📂 Categorias padrão criadas para ${phone} (${categoriasPadrao.length} categorias)`);
+    return true;
+  }
+  return false;
+}
+
+// Executar para todos os usuários existentes (somente uma vez na inicialização)
+(async () => {
+  try {
+    const users = await User.find({}, 'phone');
+    for (const user of users) {
+      await criarCategoriasPadrao(user.phone);
+    }
+    console.log('✅ Verificação de categorias padrão concluída.');
+  } catch (err) {
+    console.error('Erro ao criar categorias padrão:', err);
+  }
+})();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Bot Zeca do Caixa rodando na porta ${PORT} 🚀`));
