@@ -923,6 +923,11 @@ app.post("/api/limites/categoria", authMiddleware, async (req, res) => {
   }
 });
 
+// ROTA DE SAÚDE
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
 // --- CRON JOB (recorrências, lembretes, parcelas e fatura) ---
 cron.schedule('0 * * * *', async () => {
   console.log("Processando tarefas agendadas...");
