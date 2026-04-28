@@ -133,9 +133,16 @@ const Finance = mongoose.model("Finance", new mongoose.Schema({
 }));
 
 const User = mongoose.model("User", new mongoose.Schema({
-  phone: String, name: String, metaMensal: { type: Number, default: 0 }, createdAt: { type: Date, default: Date.now },
-  diaFechamentoFatura: { type: Number, default: 10 }, // dia do mês
-  ultimoFechamento: { type: Date, default: null }
+  phone: String,
+  name: String,
+  metaMensal: { type: Number, default: 0 },
+  email: { type: String, default: '' },
+  plano: { type: String, default: 'inativo' },
+  intervalo: { type: String, default: 'month' },
+  validoAte: { type: Date, default: null },
+  diaFechamentoFatura: { type: Number, default: 10 },
+  ultimoFechamento: { type: Date, default: null },
+  createdAt: { type: Date, default: Date.now }
 }));
 
 const Recorrencia = mongoose.model("Recorrencia", new mongoose.Schema({
@@ -788,6 +795,34 @@ function authMiddleware(req, res, next) {
   if (!API_SECRET_TOKEN || token === API_SECRET_TOKEN) return next();
   res.status(401).json({ erro: "Não autorizado" });
 }
+
+// Rota para sincronizar plano e dados do usuário a partir do Stripe (usado pelo webhook)
+app.post("/api/user/update-plan", authMiddleware, async (req, res) => {
+  try {
+    const { phone, email, plano, intervalo, validoAte } = req.body;
+    if (!phone) {
+      return res.status(400).json({ erro: "phone é obrigatório" });
+    }
+
+    // Atualiza ou insere o usuário no MongoDB
+    const user = await User.findOneAndUpdate(
+      { phone },
+      { 
+        email,
+        plano,
+        intervalo,
+        validoAte: validoAte ? new Date(validoAte) : null
+      },
+      { upsert: true, new: true }
+    );
+
+    console.log(`✅ Usuário ${phone} atualizado: plano ${plano}, intervalo ${intervalo}`);
+    res.json({ ok: true, user });
+  } catch (err) {
+    console.error("Erro ao atualizar plano do usuário:", err);
+    res.status(500).json({ erro: err.message });
+  }
+});
 
 app.get("/api/transacoes/:phone", authMiddleware, async (req, res) => {
   try {
