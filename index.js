@@ -813,7 +813,7 @@ app.post("/api/user/update-plan", authMiddleware, async (req, res) => {
         intervalo,
         validoAte: validoAte ? new Date(validoAte) : null
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: 'after' }
     );
 
     console.log(`✅ Usuário ${phone} atualizado: plano ${plano}, intervalo ${intervalo}`);
