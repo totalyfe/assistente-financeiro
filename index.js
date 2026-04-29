@@ -114,7 +114,11 @@ ${HELP_TEXT}`;
 const Wallet = mongoose.model("Wallet", new mongoose.Schema({
   phone: String,
   nome: { type: String, required: true },
-  tipo: { type: String, enum: ["Corrente", "Crédito"], default: "Corrente" },
+  tipo: { 
+  type: String, 
+  enum: ["Corrente", "Crédito", "Poupança", "Vale Alimentação", "Dinheiro"], 
+  default: "Corrente" 
+},
   saldo: { type: Number, default: 0 },
   limite: { type: Number, default: 0 }
 }));
