@@ -1042,7 +1042,9 @@ cron.schedule('0 * * * *', async () => {
 
 // ========== POPULAR CATEGORIAS PADRÃO PARA USUÁRIOS EXISTENTES ==========
 async function criarCategoriasPadrao(phone) {
+  console.log(`🔍 Verificando categorias para ${phone}`);
   const count = await Categoria.countDocuments({ phone });
+  console.log(`📊 Count: ${count}`);
   if (count === 0) {
     const categoriasPadrao = Object.keys(EMOJIS_CATEGORIAS).map(nome => ({
       phone,
@@ -1055,6 +1057,7 @@ async function criarCategoriasPadrao(phone) {
     console.log(`📂 Categorias padrão criadas para ${phone} (${categoriasPadrao.length} categorias)`);
     return true;
   }
+  console.log(`⚠️ Categorias já existem para ${phone}`);
   return false;
 }
 
