@@ -816,6 +816,13 @@ app.post("/api/user/update-plan", authMiddleware, async (req, res) => {
       { upsert: true, returnDocument: 'after' }
     );
 
+    // 👇 CRIA CATEGORIAS PADRÃO SE AINDA NÃO EXISTIREM
+    try {
+      await criarCategoriasPadrao(phone);
+    } catch (err) {
+      console.error(`⚠️ Erro ao criar categorias padrão para ${phone}:`, err);
+    }
+
     console.log(`✅ Usuário ${phone} atualizado: plano ${plano}, intervalo ${intervalo}`);
     res.json({ ok: true, user });
   } catch (err) {
