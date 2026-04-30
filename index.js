@@ -204,6 +204,41 @@ const Categoria = mongoose.model("Categoria", new mongoose.Schema({
   ativa: { type: Boolean, default: true }
 }));
 
+// ========== MODELOS DE INVESTIMENTOS E METAS ==========
+const Investimento = mongoose.model("Investimento", new mongoose.Schema({
+  phone: String,
+  tipo: { type: String, enum: [
+    "Tesouro Direto", "CDB/CDI", "Ações", "FIIs", "ETFs",
+    "Cripto", "Previdência", "Reserva de Emergência",
+    "Imóveis", "Negócios próprios", "Caixa"
+  ], required: true },
+  nome: { type: String, required: true },
+  quantidade: { type: Number, default: 0 },
+  precoUnitario: { type: Number, default: 0 },
+  valorAportado: { type: Number, default: 0 },
+  dataCompra: { type: Date, default: Date.now },
+  valorAtual: { type: Number, default: 0 },
+  rentabilidade: { type: Number, default: 0 } // percentual decimal (ex: 0.08 = 8%)
+}));
+
+const Aporte = mongoose.model("Aporte", new mongoose.Schema({
+  phone: String,
+  data: { type: Date, default: Date.now },
+  valor: Number,
+  investimentoId: { type: mongoose.Schema.Types.ObjectId, ref: "Investimento" }
+}));
+
+const Meta = mongoose.model("Meta", new mongoose.Schema({
+  phone: String,
+  nome: { type: String, required: true },
+  valorObjetivo: Number,
+  prazoAnos: Number,
+  aporteMensalSugerido: Number,
+  taxaAnual: { type: Number, default: 0.1 },
+  status: { type: String, enum: ["em andamento", "concluída", "atrasada"], default: "em andamento" },
+  dataCriacao: { type: Date, default: Date.now }
+}));
+
 // --- FUNÇÕES DE ENVIO ---
 async function sendZap(phone, message) {
   try {
@@ -419,7 +454,7 @@ app.post("/webhook", async (req, res) => {
   if (audio && audio.audioUrl) {
     try {
       message = await transcreverAudio(audio.audioUrl, phone);
-      console.log(`Zeca ouviu: "${message}"`);
+      console.log(`Sora ouviu: "${message}"`);
     } catch (err) {
       await sendZap(phone, "Não consegui compreender seu áudio, pode repetir?");
       return;
@@ -442,27 +477,79 @@ app.post("/webhook", async (req, res) => {
       } else {
         await User.create({ phone, name: extractedName });
         await criarCategoriasPadrao(phone);
-  await sendZapMenu(phone, WELCOME_TEXT.replace("%nome%", extractedName));
-  return;
+        await sendZapMenu(phone, WELCOME_TEXT.replace("%nome%", extractedName));
+        return;
       }
     }
 
     let data = interpretarRapido(message);
     if (!data) {
+      // ========== BUSCAR DADOS DO USUÁRIO PARA O GPT ==========
+      const investimentos = await Investimento.find({ phone });
+      const metas = await Meta.find({ phone });
+      const saldoGeral = await Wallet.aggregate([
+        { $match: { phone } },
+        { $group: { _id: null, total: { $sum: "$saldo" } } }
+      ]);
+      const totalSaldo = saldoGeral[0]?.total || 0;
+
+      let resumoInvestimentos = "Nenhum investimento cadastrado.";
+      if (investimentos.length) {
+        let totalInvestido = 0, totalAtual = 0;
+        const lista = investimentos.map(i => {
+          totalInvestido += i.valorAportado;
+          totalAtual += i.valorAtual;
+          return `${i.nome} (${i.tipo}): investido R$ ${i.valorAportado}, atual R$ ${i.valorAtual} (${((i.rentabilidade||0)*100).toFixed(1)}%)`;
+        }).join('\n');
+        resumoInvestimentos = `Total investido: R$ ${totalInvestido}\nTotal atual: R$ ${totalAtual}\nRentabilidade total: ${(((totalAtual-totalInvestido)/totalInvestido)*100).toFixed(2)}%\nDetalhes:\n${lista}`;
+      }
+
+      let resumoMetas = "Nenhuma meta financeira cadastrada.";
+      if (metas.length) {
+        const listaMetas = metas.map(m => 
+          `${m.nome}: objetivo R$ ${m.valorObjetivo} em ${m.prazoAnos} anos, aporte mensal sugerido R$ ${m.aporteMensalSugerido}`
+        ).join('\n');
+        resumoMetas = listaMetas;
+      }
+
+      const systemPrompt = `Você é a **Sora**, assistente financeira pessoal da pessoa com o telefone ${phone}. 
+Você deve responder de forma natural, amigável e útil, sempre em português.
+
+**Dados atuais do usuário:**
+- Saldo total em contas: R$ ${totalSaldo}
+- Investimentos: ${resumoInvestimentos}
+- Metas financeiras: ${resumoMetas}
+
+**Instruções importantes:**
+1. Se o usuário perguntar sobre qualquer um desses dados, responda diretamente usando as informações acima.
+2. Se o usuário pedir para **criar, atualizar ou excluir** um investimento ou meta, responda **APENAS com um JSON válido** no seguinte formato:
+   - Para criar investimento: {"acao": "criar_investimento", "tipo": "CDB/CDI", "nome": "Nome do investimento", "valorAportado": 1000, "quantidade": 1, "precoUnitario": 1000}
+   - Para criar meta: {"acao": "criar_meta", "nome": "Casa própria", "valorObjetivo": 500000, "prazoAnos": 10, "taxaAnual": 10}
+   - Para listar investimentos/metas: {"acao": "listar_investimentos"} ou {"acao": "listar_metas"}
+   - Para deletar: {"acao": "deletar_investimento", "id": "id_do_investimento"} ou {"acao": "deletar_meta", "id": "id_da_meta"}
+   - Para obter planejamento baseado em gastos: {"acao": "planejamento"}
+3. Se a conversa for genérica (como "oi", "obrigado", "como você está?"), responda normalmente como uma assistente simpática.
+4. **NUNCA** inclua texto fora do JSON quando for executar uma ação. Apenas o JSON.
+5. Se não souber o que fazer, pergunte de forma educada o que o usuário deseja.
+
+Agora, responda de acordo com a mensagem do usuário.`;
+
       const response = await axios.post("https://api.openai.com/v1/chat/completions", {
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: `Você é um assistente financeiro. Responda APENAS com JSON. Possíveis ações: salvar, resumo, apagar, set_meta, set_recorrente, set_wallet, ver_saldos, analisar, transferir, buscar, set_limite, meus_limites, criar_lembrete, ajuda, compra_parcelada, pagar_parcela, set_fatura_dia. Para 'salvar', inclua tipo, valor, categoria, carteira, observacao, pago, recorrente, vencimento. Para 'buscar', termo pode ser 'TUDO' ou uma categoria.` },
+          { role: "system", content: systemPrompt },
           { role: "user", content: message }
         ],
-        temperature: 0
+        temperature: 0.2
       }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
+
       let aiReply = response.data.choices[0].message.content.replace(/```json|```/g, "").trim();
       try {
         data = JSON.parse(aiReply);
       } catch (e) {
         console.log("Erro parse IA:", aiReply);
-        data = { acao: "conversa", resposta: "Não entendi direito... pode reformular?" };
+        await sendZap(phone, aiReply);
+        return;
       }
     }
 
@@ -547,7 +634,6 @@ app.post("/webhook", async (req, res) => {
       }
       const valorParcela = parcela.valorParcela;
       await sendZap(phone, `💳 Para pagar a parcela ${parcela.parcelasPagas+1}/${parcela.totalParcelas} de R$ ${valorParcela.toFixed(2)} da compra "${parcela.descricao}", transfira esse valor da sua conta débito para a conta ${parcela.carteira} usando:\n\n"transferir ${valorParcela.toFixed(2)} do [sua_conta] para ${parcela.carteira}"\n\nApós a transferência, me avise "parcela paga ${descricao}" para eu atualizar.`);
-      // Para automatizar, poderíamos receber confirmação, mas por ora orientamos.
     }
     else if (data.acao === "apagar") {
       let excluido;
@@ -626,10 +712,8 @@ app.post("/webhook", async (req, res) => {
       await Finance.create({ phone, idCurto: nanoid(6), tipo: "Transferência", categoria: "Transferência", valor: valorLimpo, observacao: `Pix: ${nomeOrigem} ➔ ${nomeDestino}` });
       await sendZap(phone, `💸 *Transferência concluída!*\n\nSaída: *${nomeOrigem}*\nEntrada: *${nomeDestino}*\nValor: R$ ${valorLimpo.toFixed(2)}`);
       
-      // Verificar se a transferência foi para uma conta de crédito (pagamento de parcela/fatura)
       const contaDestino = await Wallet.findOne({ phone, nome: nomeDestino });
       if (contaDestino && contaDestino.tipo === "Crédito") {
-        // Tentar encontrar parcela pendente para abater
         const parcela = await Parcela.findOne({ phone, carteira: nomeDestino, ativa: true, parcelasPagas: { $lt: "$totalParcelas" } }).sort({ dataProximaVencimento: 1 });
         if (parcela) {
           parcela.parcelasPagas += 1;
@@ -637,7 +721,6 @@ app.post("/webhook", async (req, res) => {
             parcela.ativa = false;
             await sendZap(phone, `🎉 Parabéns! Você quitou todas as parcelas de "${parcela.descricao}".`);
           } else {
-            // Atualizar próxima data de vencimento +30 dias
             const novaData = new Date();
             novaData.setDate(novaData.getDate() + 30);
             parcela.dataProximaVencimento = novaData;
@@ -718,6 +801,83 @@ app.post("/webhook", async (req, res) => {
       });
       await sendZap(phone, `🔔 Lembrete criado: ${data.tipo === "pagar" ? "🔴 Pagar" : "🟢 Receber"} *${data.descricao}* no valor de R$ ${data.valor.toFixed(2)} até ${dataVenc.toLocaleDateString('pt-BR')}.`);
     }
+    // ========== NOVAS AÇÕES DE INVESTIMENTOS E METAS ==========
+    else if (data.acao === "criar_investimento") {
+      const { tipo, nome, valorAportado, quantidade, precoUnitario } = data;
+      const investimento = await Investimento.create({
+        phone, tipo, nome, 
+        quantidade: quantidade || 1, 
+        precoUnitario: precoUnitario || valorAportado,
+        valorAportado,
+        valorAtual: (quantidade || 1) * (precoUnitario || valorAportado),
+        rentabilidade: 0
+      });
+      await sendZap(phone, `✅ Investimento "${investimento.nome}" (${investimento.tipo}) criado com valor aportado de R$ ${investimento.valorAportado.toFixed(2)}.`);
+    }
+    else if (data.acao === "criar_meta") {
+      const { nome, valorObjetivo, prazoAnos, taxaAnual } = data;
+      const jurosMensal = Math.pow(1 + (taxaAnual / 100), 1/12) - 1;
+      const n = prazoAnos * 12;
+      let aporteMensal = (valorObjetivo * jurosMensal) / (Math.pow(1 + jurosMensal, n) - 1);
+      if (!isFinite(aporteMensal)) aporteMensal = valorObjetivo / n;
+      const meta = await Meta.create({
+        phone, nome, valorObjetivo, prazoAnos, taxaAnual,
+        aporteMensalSugerido: parseFloat(aporteMensal.toFixed(2))
+      });
+      await sendZap(phone, `🎯 Meta "${meta.nome}" criada! Para alcançar R$ ${meta.valorObjetivo} em ${meta.prazoAnos} anos, aporte R$ ${meta.aporteMensalSugerido}/mês (considerando ${taxaAnual}% a.a.).`);
+    }
+    else if (data.acao === "listar_investimentos") {
+      const invs = await Investimento.find({ phone });
+      if (invs.length === 0) {
+        await sendZap(phone, "Você ainda não tem nenhum investimento cadastrado. Diga 'criar investimento' para começar.");
+      } else {
+        let totalInv = 0, totalAtual = 0;
+        let msg = "📈 *SEUS INVESTIMENTOS:*\n\n";
+        for (const i of invs) {
+          totalInv += i.valorAportado;
+          totalAtual += i.valorAtual;
+          msg += `💰 *${i.nome}* (${i.tipo})\nAportado: R$ ${i.valorAportado} | Atual: R$ ${i.valorAtual}\nRent: ${((i.rentabilidade||0)*100).toFixed(1)}%\n\n`;
+        }
+        const rendTotal = ((totalAtual - totalInv) / totalInv) * 100;
+        msg += `*TOTAL:* Aportado R$ ${totalInv} | Atual R$ ${totalAtual} | Rent. Total ${rendTotal.toFixed(2)}%`;
+        await sendZap(phone, msg);
+      }
+    }
+    else if (data.acao === "listar_metas") {
+      const metasList = await Meta.find({ phone });
+      if (metasList.length === 0) {
+        await sendZap(phone, "Nenhuma meta cadastrada. Diga 'criar meta' para definir uma.");
+      } else {
+        let msg = "🎯 *SUAS METAS FINANCEIRAS:*\n\n";
+        for (const m of metasList) {
+          msg += `*${m.nome}*: R$ ${m.valorObjetivo} em ${m.prazoAnos} anos\nAporte mensal sugerido: R$ ${m.aporteMensalSugerido}\nStatus: ${m.status}\n\n`;
+        }
+        await sendZap(phone, msg);
+      }
+    }
+    else if (data.acao === "planejamento") {
+      const umAnoAtras = new Date(); umAnoAtras.setFullYear(umAnoAtras.getFullYear() - 1);
+      const transacoes = await Finance.find({ phone, data: { $gte: umAnoAtras } });
+      let receitas = 0, despesas = 0;
+      transacoes.forEach(t => {
+        if (t.tipo === "Recebimento") receitas += t.valor;
+        else if (t.tipo === "Gasto") despesas += t.valor;
+      });
+      const sobraMedia = (receitas - despesas) / 12;
+      await sendZap(phone, `📊 *PLANEJAMENTO SUGERIDO*\n\nCom base nos seus gastos dos últimos 12 meses, sua sobra média mensal é de *R$ ${sobraMedia.toFixed(2)}*.\n\n💡 Você pode investir esse valor para alcançar metas mais rápido. Quer criar uma meta com esse aporte? Diga 'sim' ou 'criar meta'.`);
+    }
+    else if (data.acao === "deletar_investimento") {
+      const { id } = data;
+      const result = await Investimento.findByIdAndDelete(id);
+      if (result) await sendZap(phone, `🗑️ Investimento "${result.nome}" removido.`);
+      else await sendZap(phone, "Investimento não encontrado.");
+    }
+    else if (data.acao === "deletar_meta") {
+      const { id } = data;
+      const result = await Meta.findByIdAndDelete(id);
+      if (result) await sendZap(phone, `🗑️ Meta "${result.nome}" removida.`);
+      else await sendZap(phone, "Meta não encontrada.");
+    }
     else if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
       let carteiraNormalizada = data.carteira ? data.carteira.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim() : "";
@@ -797,14 +957,14 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// --- ROTAS DA API PROTEGIDAS ---
+// --- ROTAS DA API PROTEGIDAS (incluindo as novas de investimentos e metas) ---
 function authMiddleware(req, res, next) {
   const token = req.query.token || req.headers['x-api-token'];
   if (!API_SECRET_TOKEN || token === API_SECRET_TOKEN) return next();
   res.status(401).json({ erro: "Não autorizado" });
 }
 
-// Rota para sincronizar plano e dados do usuário a partir do Stripe (usado pelo webhook)
+// Rota para sincronizar plano e dados do usuário a partir do Stripe
 app.post("/api/user/update-plan", authMiddleware, async (req, res) => {
   try {
     const { phone, email, plano, intervalo, validoAte } = req.body;
@@ -812,19 +972,12 @@ app.post("/api/user/update-plan", authMiddleware, async (req, res) => {
       return res.status(400).json({ erro: "phone é obrigatório" });
     }
 
-    // Atualiza ou insere o usuário no MongoDB
     const user = await User.findOneAndUpdate(
       { phone },
-      { 
-        email,
-        plano,
-        intervalo,
-        validoAte: validoAte ? new Date(validoAte) : null
-      },
+      { email, plano, intervalo, validoAte: validoAte ? new Date(validoAte) : null },
       { upsert: true, returnDocument: 'after' }
     );
 
-    // 👇 CRIA CATEGORIAS PADRÃO SE AINDA NÃO EXISTIREM
     try {
       await criarCategoriasPadrao(phone);
     } catch (err) {
@@ -868,7 +1021,6 @@ app.get("/api/wallets/:phone", authMiddleware, async (req, res) => {
 app.post("/api/wallets", authMiddleware, async (req, res) => {
   try {
     const { phone, nome, tipo, saldo, limite } = req.body;
-    // Verifica limite de 3 contas
     const count = await Wallet.countDocuments({ phone });
     if (count >= 3 && !(await Wallet.findOne({ phone, nome }))) {
       return res.status(400).json({ erro: "Limite de 3 contas atingido" });
@@ -924,11 +1076,7 @@ app.put("/api/categorias/:id", authMiddleware, async (req, res) => {
     if (cor !== undefined) atualizacao.cor = cor;
     if (arquivada !== undefined) atualizacao.arquivada = arquivada;
     
-    const categoria = await Categoria.findByIdAndUpdate(
-      req.params.id,
-      atualizacao,
-      { new: true }
-    );
+    const categoria = await Categoria.findByIdAndUpdate(req.params.id, atualizacao, { new: true });
     if (!categoria) return res.status(404).json({ erro: "Categoria não encontrada" });
     res.json(categoria);
   } catch (err) {
@@ -976,6 +1124,107 @@ app.post("/api/limites/categoria", authMiddleware, async (req, res) => {
       { upsert: true, new: true }
     );
     res.json(limite);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// ================= ROTAS DE INVESTIMENTOS E METAS =================
+app.get("/api/investimentos/:phone", authMiddleware, async (req, res) => {
+  try {
+    const investimentos = await Investimento.find({ phone: req.params.phone });
+    res.json(investimentos);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.post("/api/investimentos", authMiddleware, async (req, res) => {
+  try {
+    const { phone, tipo, nome, quantidade, precoUnitario, valorAportado, dataCompra } = req.body;
+    const investimento = await Investimento.create({
+      phone, tipo, nome, quantidade, precoUnitario, valorAportado, dataCompra,
+      valorAtual: quantidade * precoUnitario,
+      rentabilidade: 0
+    });
+    res.json(investimento);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.put("/api/investimentos/:id", authMiddleware, async (req, res) => {
+  try {
+    const { quantidade, precoUnitario, valorAtual } = req.body;
+    const investimento = await Investimento.findByIdAndUpdate(
+      req.params.id,
+      { quantidade, precoUnitario, valorAtual },
+      { new: true }
+    );
+    res.json(investimento);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.delete("/api/investimentos/:id", authMiddleware, async (req, res) => {
+  try {
+    await Investimento.findByIdAndDelete(req.params.id);
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.get("/api/metas/:phone", authMiddleware, async (req, res) => {
+  try {
+    const metas = await Meta.find({ phone: req.params.phone });
+    res.json(metas);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.post("/api/metas", authMiddleware, async (req, res) => {
+  try {
+    const { phone, nome, valorObjetivo, prazoAnos, taxaAnual } = req.body;
+    const jurosMensal = Math.pow(1 + (taxaAnual / 100), 1/12) - 1;
+    const n = prazoAnos * 12;
+    let aporteMensal = (valorObjetivo * jurosMensal) / (Math.pow(1 + jurosMensal, n) - 1);
+    if (!isFinite(aporteMensal)) aporteMensal = valorObjetivo / n;
+    const meta = await Meta.create({
+      phone, nome, valorObjetivo, prazoAnos, taxaAnual,
+      aporteMensalSugerido: parseFloat(aporteMensal.toFixed(2))
+    });
+    res.json(meta);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.delete("/api/metas/:id", authMiddleware, async (req, res) => {
+  try {
+    await Meta.findByIdAndDelete(req.params.id);
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.get("/api/planejamento/:phone", authMiddleware, async (req, res) => {
+  try {
+    const phone = req.params.phone;
+    const umAnoAtras = new Date();
+    umAnoAtras.setFullYear(umAnoAtras.getFullYear() - 1);
+    const transacoes = await Finance.find({ phone, data: { $gte: umAnoAtras } });
+    let receitas = 0, despesas = 0;
+    transacoes.forEach(t => {
+      if (t.tipo === "Recebimento") receitas += t.valor;
+      else if (t.tipo === "Gasto") despesas += t.valor;
+    });
+    const mediaMensalSobra = (receitas - despesas) / 12;
+    const sugestao = `Com base nos seus gastos dos últimos 12 meses, sua sobra média mensal é de R$ ${mediaMensalSobra.toFixed(2)}. Você pode começar investindo esse valor.`;
+    res.json({ mediaMensalSobra, sugestao });
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
@@ -1037,17 +1286,13 @@ cron.schedule('0 * * * *', async () => {
       let inicioPeriodo = user.ultimoFechamento || new Date(hoje.getFullYear(), hoje.getMonth()-1, user.diaFechamentoFatura);
       if (!user.ultimoFechamento) inicioPeriodo = new Date(hoje.getFullYear(), hoje.getMonth()-1, user.diaFechamentoFatura);
       const fimPeriodo = hoje;
-      // Somar parcelas que venceram no período (considerando dataProximaVencimento dentro do período)
       const parcelasPeriodo = await Parcela.find({
         phone: user.phone,
         dataProximaVencimento: { $gte: inicioPeriodo, $lte: fimPeriodo },
         ativa: true
       });
       let totalFatura = 0;
-      for (const p of parcelasPeriodo) {
-        totalFatura += p.valorParcela;
-      }
-      // Poderia somar também compras à vista no crédito no período (Finance com tipo Gasto e carteira crédito)
+      for (const p of parcelasPeriodo) totalFatura += p.valorParcela;
       const comprasAvista = await Finance.find({
         phone: user.phone,
         tipo: "Gasto",
@@ -1069,7 +1314,6 @@ async function criarCategoriasPadrao(phone) {
   const count = await Categoria.countDocuments({ phone });
   console.log(`📊 Count: ${count}`);
   if (count === 0) {
-    // 1. Criar categorias principais a partir do EMOJIS_CATEGORIAS
     const categoriasPadrao = Object.keys(EMOJIS_CATEGORIAS).map(nome => ({
       phone,
       nome,
@@ -1080,92 +1324,35 @@ async function criarCategoriasPadrao(phone) {
     const inserted = await Categoria.insertMany(categoriasPadrao);
     console.log(`📂 Categorias principais criadas para ${phone} (${inserted.length} categorias)`);
 
-    // 2. Mapear nome da categoria -> _id
     const mapa = {};
-    for (const cat of inserted) {
-      mapa[cat.nome] = cat._id;
-    }
+    for (const cat of inserted) mapa[cat.nome] = cat._id;
 
-    // 3. Criar subcategorias
     const subcategorias = [];
-
-    // Assinaturas
     if (mapa["Assinaturas"]) {
       const subs = ["Netflix", "HBO Max", "Disney+", "Globo Play", "Prime Video", "IPTV", "Spotify"];
-      for (const sub of subs) {
-        subcategorias.push({
-          phone,
-          nome: sub,
-          icone: "📺",
-          parent: mapa["Assinaturas"],
-          ativa: true
-        });
-      }
+      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "📺", parent: mapa["Assinaturas"], ativa: true });
     }
-
-    // Vestuário
     if (mapa["Vestuário"]) {
       const subs = ["Shein", "Adidas", "Nike"];
-      for (const sub of subs) {
-        subcategorias.push({
-          phone,
-          nome: sub,
-          icone: "👕",
-          parent: mapa["Vestuário"],
-          ativa: true
-        });
-      }
+      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "👕", parent: mapa["Vestuário"], ativa: true });
     }
-
-    // Alimentação
     if (mapa["Alimentação"]) {
       const subs = ["Fastfood"];
-      for (const sub of subs) {
-        subcategorias.push({
-          phone,
-          nome: sub,
-          icone: "🍔",
-          parent: mapa["Alimentação"],
-          ativa: true
-        });
-      }
+      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "🍔", parent: mapa["Alimentação"], ativa: true });
     }
-
-    // Casa
     if (mapa["Casa"]) {
       const subs = ["Conta de luz", "Conta de água", "Gás"];
-      for (const sub of subs) {
-        subcategorias.push({
-          phone,
-          nome: sub,
-          icone: "🏡",
-          parent: mapa["Casa"],
-          ativa: true
-        });
-      }
+      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "🏡", parent: mapa["Casa"], ativa: true });
     }
-
-    // Lazer e Entretenimento
     if (mapa["Lazer e Entretenimento"]) {
       const subs = ["Festas"];
-      for (const sub of subs) {
-        subcategorias.push({
-          phone,
-          nome: sub,
-          icone: "🎉",
-          parent: mapa["Lazer e Entretenimento"],
-          ativa: true
-        });
-      }
+      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "🎉", parent: mapa["Lazer e Entretenimento"], ativa: true });
     }
-
-    // Transferências (nova categoria principal - você já tem "Transferências" no EMOJIS_CATEGORIAS)
     if (mapa["Transferências"]) {
       const subs = ["PIX", "TED", "DOC", "Boleto", "Transferência entre contas"];
       for (const sub of subs) {
         subcategorias.push({
-          phone,
-          nome: sub,
+          phone, nome: sub,
           icone: sub === "PIX" ? "💸" : (sub === "Boleto" ? "📄" : "🔄"),
           parent: mapa["Transferências"],
           ativa: true
