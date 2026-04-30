@@ -196,8 +196,10 @@ const Parcela = mongoose.model("Parcela", new mongoose.Schema({
 const Categoria = mongoose.model("Categoria", new mongoose.Schema({
   phone: String,
   nome: { type: String, required: true },
-  parent: { type: mongoose.Schema.Types.ObjectId, ref: "Categoria" }, // null = categoria principal
+  parent: { type: mongoose.Schema.Types.ObjectId, ref: "Categoria" },
   icone: { type: String, default: "📦" },
+  cor: { type: String, default: "#808080" },      // <-- NOVO
+  arquivada: { type: Boolean, default: false },   // <-- NOVO
   ativa: { type: Boolean, default: true }
 }));
 
@@ -912,12 +914,20 @@ app.post("/api/categorias", authMiddleware, async (req, res) => {
 
 app.put("/api/categorias/:id", authMiddleware, async (req, res) => {
   try {
-    const { nome, parentId, icone, ativa } = req.body;
+    const { nome, parentId, icone, cor, arquivada } = req.body;
+    const atualizacao = {};
+    if (nome !== undefined) atualizacao.nome = nome;
+    if (parentId !== undefined) atualizacao.parent = parentId || null;
+    if (icone !== undefined) atualizacao.icone = icone;
+    if (cor !== undefined) atualizacao.cor = cor;
+    if (arquivada !== undefined) atualizacao.arquivada = arquivada;
+    
     const categoria = await Categoria.findByIdAndUpdate(
       req.params.id,
-      { nome, parent: parentId || null, icone, ativa },
+      atualizacao,
       { new: true }
     );
+    if (!categoria) return res.status(404).json({ erro: "Categoria não encontrada" });
     res.json(categoria);
   } catch (err) {
     res.status(500).json({ erro: err.message });
