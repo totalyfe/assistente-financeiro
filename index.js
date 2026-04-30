@@ -142,12 +142,14 @@ const User = mongoose.model("User", new mongoose.Schema({
   name: String,
   metaMensal: { type: Number, default: 0 },
   email: { type: String, default: '' },
-  plano: { type: String, default: 'inativo' },
+  plano: { type: String, enum: ['inativo', 'basico', 'premium', 'black'], default: 'inativo' },
   intervalo: { type: String, default: 'month' },
   validoAte: { type: Date, default: null },
   diaFechamentoFatura: { type: Number, default: 10 },
   ultimoFechamento: { type: Date, default: null },
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  rendaMediaMensal: { type: Number, default: 0 },
+  ultimaAtualizacaoRenda: { type: Date, default: null }
 }));
 
 const Recorrencia = mongoose.model("Recorrencia", new mongoose.Schema({
@@ -236,9 +238,31 @@ const Meta = mongoose.model("Meta", new mongoose.Schema({
   prazoAnos: Number,
   aporteMensalSugerido: Number,
   taxaAnual: { type: Number, default: 0.1 },
+  investimentoId: { type: mongoose.Schema.Types.ObjectId, ref: "Investimento" },
   status: { type: String, enum: ["em andamento", "concluída", "atrasada"], default: "em andamento" },
   dataCriacao: { type: Date, default: Date.now }
 }));
+
+// ========== MODELOS PARA HISTÓRICO E EVOLUÇÃO PATRIMONIAL ==========
+const HistoricoInvestimento = mongoose.model("HistoricoInvestimento", new mongoose.Schema({
+  phone: String,
+  investimentoId: { type: mongoose.Schema.Types.ObjectId, ref: "Investimento" },
+  data: { type: Date, default: Date.now },
+  valorAtual: Number
+}));
+
+const PatrimonioHistorico = mongoose.model("PatrimonioHistorico", new mongoose.Schema({
+  phone: String,
+  data: { type: Date, default: Date.now },
+  patrimonioTotal: Number,
+  rentabilidadePeriodo: Number
+}));
+
+// ========== FUNÇÃO DE VERIFICAÇÃO DE PLANO BLACK ==========
+async function verificarPlanoInvestimentos(phone) {
+  const user = await User.findOne({ phone });
+  return user && user.plano === 'black';
+}
 
 // --- FUNÇÕES DE ENVIO ---
 async function sendZap(phone, message) {
@@ -436,6 +460,38 @@ async function verificarLimiteCategoria(phone, categoria, valorGasto) {
   }
 }
 
+// --- FUNÇÕES AUXILIARES PARA RENDA E AJUSTE DE METAS ---
+async function atualizarRendaMedia(phone) {
+  const seisMesesAtras = new Date();
+  seisMesesAtras.setMonth(seisMesesAtras.getMonth() - 6);
+  const receitas = await Finance.aggregate([
+    { $match: { phone, tipo: "Recebimento", data: { $gte: seisMesesAtras } } },
+    { $group: { _id: null, total: { $sum: "$valor" } } }
+  ]);
+  const totalReceitas = receitas[0]?.total || 0;
+  const meses = 6;
+  const novaRendaMedia = totalReceitas / meses;
+  const user = await User.findOne({ phone });
+  if (user) {
+    const rendaAntiga = user.rendaMediaMensal || 0;
+    await User.updateOne({ phone }, { rendaMediaMensal: novaRendaMedia, ultimaAtualizacaoRenda: new Date() });
+    if (rendaAntiga > 0) {
+      const variacao = (novaRendaMedia - rendaAntiga) / rendaAntiga;
+      if (Math.abs(variacao) > 0.1) {
+        const metas = await Meta.find({ phone, status: "em andamento" });
+        if (metas.length > 0) {
+          const sugestao = `📊 *Ajuste automático de metas*\n\nSua renda média mensal ${variacao > 0 ? 'aumentou' : 'diminuiu'} de R$ ${rendaAntiga.toFixed(2)} para R$ ${novaRendaMedia.toFixed(2)}.\n`;
+          if (variacao > 0) {
+            await sendZap(phone, sugestao + `Você pode aumentar seus aportes mensais. Deseja recalcular suas metas? Diga "recalcular metas".`);
+          } else {
+            await sendZap(phone, sugestao + `Sugiro revisar suas metas para evitar comprometer seu orçamento. Diga "recalcular metas".`);
+          }
+        }
+      }
+    }
+  }
+}
+
 // --- WEBHOOK PRINCIPAL ---
 app.post("/webhook", async (req, res) => {
   const { phone, text, listResponseMessage, audio, fromMe } = req.body;
@@ -522,6 +578,8 @@ Você deve responder de forma natural, amigável e útil, sempre em português.
    - Para obter planejamento baseado em gastos: {"acao": "planejamento"}
    - Para registrar um aporte: {"acao": "registrar_aporte", "valor": 500, "investimentoId": "id_do_investimento (opcional)", "descricao": "Aporte mensal"}
    - Para listar aportes: {"acao": "listar_aportes"}
+   - Para ver o progresso de uma meta: {"acao": "progresso_meta", "metaId": "id_da_meta"}
+   - Para sugerir alocação para uma meta: {"acao": "sugerir_alocacao", "metaId": "id_da_meta", "perfil": "moderado (opcional)"}
 3. Se a conversa for genérica (como "oi", "obrigado", "como você está?"), responda normalmente como uma assistente simpática.
 4. **NUNCA** inclua texto fora do JSON quando for executar uma ação. Apenas o JSON.
 5. Se não souber o que fazer, pergunte de forma educada o que o usuário deseja.
@@ -559,6 +617,9 @@ Agora, responda de acordo com a mensagem do usuário.`;
       "BANCO DO BRASIL CREDITO": "Banco do Brasil Crédito", "CAIXA": "Caixa",
       "SAFRA": "Safra", "SAFRA CREDITO": "Safra Crédito",
     };
+
+    // ========== VERIFICAÇÃO DE PLANO BLACK PARA INVESTIMENTOS ==========
+    // (A verificação será feita dentro de cada ação de investimento)
 
     // --- AÇÕES ---
     if (data.acao === "set_meta") {
@@ -795,8 +856,14 @@ Agora, responda de acordo com a mensagem do usuário.`;
       });
       await sendZap(phone, `🔔 Lembrete criado: ${data.tipo === "pagar" ? "🔴 Pagar" : "🟢 Receber"} *${data.descricao}* no valor de R$ ${data.valor.toFixed(2)} até ${dataVenc.toLocaleDateString('pt-BR')}.`);
     }
-    // ========== AÇÕES DE INVESTIMENTOS, METAS E APORTES ==========
+
+    // ========== AÇÕES DE INVESTIMENTOS (PROTEGIDAS POR PLANO BLACK) ==========
     else if (data.acao === "criar_investimento") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de investimentos está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
       const { tipo, nome, valorAportado, quantidade, precoUnitario } = data;
       const investimento = await Investimento.create({
         phone, tipo, nome, 
@@ -809,18 +876,29 @@ Agora, responda de acordo com a mensagem do usuário.`;
       await sendZap(phone, `✅ Investimento "${investimento.nome}" (${investimento.tipo}) criado com valor aportado de R$ ${investimento.valorAportado.toFixed(2)}.`);
     }
     else if (data.acao === "criar_meta") {
-      const { nome, valorObjetivo, prazoAnos, taxaAnual } = data;
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de metas financeiras está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
+      const { nome, valorObjetivo, prazoAnos, taxaAnual, investimentoId } = data;
       const jurosMensal = Math.pow(1 + (taxaAnual / 100), 1/12) - 1;
       const n = prazoAnos * 12;
       let aporteMensal = (valorObjetivo * jurosMensal) / (Math.pow(1 + jurosMensal, n) - 1);
       if (!isFinite(aporteMensal)) aporteMensal = valorObjetivo / n;
       const meta = await Meta.create({
         phone, nome, valorObjetivo, prazoAnos, taxaAnual,
-        aporteMensalSugerido: parseFloat(aporteMensal.toFixed(2))
+        aporteMensalSugerido: parseFloat(aporteMensal.toFixed(2)),
+        investimentoId: investimentoId || null
       });
       await sendZap(phone, `🎯 Meta "${meta.nome}" criada! Para alcançar R$ ${meta.valorObjetivo} em ${meta.prazoAnos} anos, aporte R$ ${meta.aporteMensalSugerido}/mês (considerando ${taxaAnual}% a.a.).`);
     }
     else if (data.acao === "listar_investimentos") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de investimentos está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
       const invs = await Investimento.find({ phone });
       if (invs.length === 0) {
         await sendZap(phone, "Você ainda não tem nenhum investimento cadastrado. Diga 'criar investimento' para começar.");
@@ -846,6 +924,11 @@ Agora, responda de acordo com a mensagem do usuário.`;
       }
     }
     else if (data.acao === "listar_metas") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de metas financeiras está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
       const metasList = await Meta.find({ phone });
       if (metasList.length === 0) {
         await sendZap(phone, "Nenhuma meta cadastrada. Diga 'criar meta' para definir uma.");
@@ -858,6 +941,11 @@ Agora, responda de acordo com a mensagem do usuário.`;
       }
     }
     else if (data.acao === "planejamento") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de planejamento de investimentos está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
       const umAnoAtras = new Date(); umAnoAtras.setFullYear(umAnoAtras.getFullYear() - 1);
       const transacoes = await Finance.find({ phone, data: { $gte: umAnoAtras } });
       let receitas = 0, despesas = 0;
@@ -869,18 +957,33 @@ Agora, responda de acordo com a mensagem do usuário.`;
       await sendZap(phone, `📊 *PLANEJAMENTO SUGERIDO*\n\nCom base nos seus gastos dos últimos 12 meses, sua sobra média mensal é de *R$ ${sobraMedia.toFixed(2)}*.\n\n💡 Você pode investir esse valor para alcançar metas mais rápido. Quer criar uma meta com esse aporte? Diga 'sim' ou 'criar meta'.`);
     }
     else if (data.acao === "deletar_investimento") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de investimentos está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
       const { id } = data;
       const result = await Investimento.findByIdAndDelete(id);
       if (result) await sendZap(phone, `🗑️ Investimento "${result.nome}" removido.`);
       else await sendZap(phone, "Investimento não encontrado.");
     }
     else if (data.acao === "deletar_meta") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de metas financeiras está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
       const { id } = data;
       const result = await Meta.findByIdAndDelete(id);
       if (result) await sendZap(phone, `🗑️ Meta "${result.nome}" removida.`);
       else await sendZap(phone, "Meta não encontrada.");
     }
     else if (data.acao === "registrar_aporte") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de aportes está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
       const { valor, investimentoId, descricao } = data;
       if (!valor || valor <= 0) {
         await sendZap(phone, "❌ Valor do aporte inválido.");
@@ -909,8 +1012,28 @@ Agora, responda de acordo com a mensagem do usuário.`;
       } else {
         await sendZap(phone, `💰 Aporte de R$ ${valor.toFixed(2)} registrado com sucesso.`);
       }
+      if (investimentoId) {
+        const metasAssociadas = await Meta.find({ phone, investimentoId });
+        for (const meta of metasAssociadas) {
+          const totalAportado = await Aporte.aggregate([
+            { $match: { phone, investimentoId } },
+            { $group: { _id: null, total: { $sum: "$valor" } } }
+          ]);
+          const aportado = totalAportado[0]?.total || 0;
+          if (aportado >= meta.valorObjetivo) {
+            meta.status = "concluída";
+            await meta.save();
+            await sendZap(phone, `🎉 Parabéns! Você atingiu sua meta "${meta.nome}"! 🎉`);
+          }
+        }
+      }
     }
     else if (data.acao === "listar_aportes") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de aportes está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
       const aportes = await Aporte.find({ phone }).sort({ data: -1 }).limit(10);
       if (aportes.length === 0) {
         await sendZap(phone, "Nenhum aporte registrado ainda. Use 'registrar aporte' para começar.");
@@ -923,6 +1046,69 @@ Agora, responda de acordo com a mensagem do usuário.`;
         }
         await sendZap(phone, msg);
       }
+    }
+    else if (data.acao === "progresso_meta") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de progresso de metas está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
+      const { metaId } = data;
+      const meta = await Meta.findOne({ phone, _id: metaId });
+      if (!meta) {
+        await sendZap(phone, "Meta não encontrada.");
+        return;
+      }
+      let totalAportado = 0;
+      if (meta.investimentoId) {
+        const aportes = await Aporte.aggregate([
+          { $match: { phone, investimentoId: meta.investimentoId } },
+          { $group: { _id: null, total: { $sum: "$valor" } } }
+        ]);
+        totalAportado = aportes[0]?.total || 0;
+      } else {
+        const aportes = await Aporte.aggregate([
+          { $match: { phone } },
+          { $group: { _id: null, total: { $sum: "$valor" } } }
+        ]);
+        totalAportado = aportes[0]?.total || 0;
+      }
+      const faltante = meta.valorObjetivo - totalAportado;
+      const mesesRestantes = Math.ceil(faltante / meta.aporteMensalSugerido);
+      const anosRestantes = (mesesRestantes / 12).toFixed(1);
+      const percentual = (totalAportado / meta.valorObjetivo) * 100;
+      let statusEmoji = "⏳";
+      if (percentual >= 100) statusEmoji = "✅";
+      else if (percentual >= 75) statusEmoji = "📈";
+      await sendZap(phone, `🎯 *Progresso da meta "${meta.nome}"*\n\n💰 Objetivo: R$ ${meta.valorObjetivo}\n✅ Já aportado: R$ ${totalAportado.toFixed(2)} (${percentual.toFixed(1)}%)\n📉 Faltam: R$ ${faltante.toFixed(2)}\n⏱️ Aporte mensal sugerido: R$ ${meta.aporteMensalSugerido}\n📅 Tempo estimado restante: ${mesesRestantes} meses (${anosRestantes} anos)\n${statusEmoji} Status: ${meta.status}`);
+    }
+    else if (data.acao === "sugerir_alocacao") {
+      const isBlack = await verificarPlanoInvestimentos(phone);
+      if (!isBlack) {
+        await sendZap(phone, "🚫 A funcionalidade de sugestão de alocação está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+        return;
+      }
+      const { metaId, perfil } = data;
+      const meta = await Meta.findOne({ phone, _id: metaId });
+      if (!meta) {
+        await sendZap(phone, "Meta não encontrada.");
+        return;
+      }
+      const perfilUsuario = perfil || "moderado";
+      let sugestao = "";
+      if (meta.prazoAnos <= 3) {
+        sugestao = "💰 *Para prazos curtos (até 3 anos), recomendo:*\n- 80% em Renda Fixa (Tesouro Selic, CDB pós-fixado)\n- 20% em Fundos DI ou poupança.\nEvite renda variável devido ao risco.";
+      } else if (meta.prazoAnos <= 7) {
+        sugestao = "📈 *Para prazos médios (4-7 anos):*\n- 60% Renda Fixa (Tesouro IPCA+, CDB)\n- 30% Renda Variável (Ações de boas empresas, FIIs)\n- 10% Reserva de liquidez (Tesouro Selic).";
+      } else {
+        sugestao = "🚀 *Para prazos longos (>7 anos):*\n- 40% Renda Fixa (Tesouro IPCA+)\n- 50% Renda Variável (Ações, ETFs, FIIs)\n- 10% Reserva de emergência.\nConsidere também exposição internacional (IVVB11).";
+      }
+      if (perfilUsuario === "conservador") {
+        sugestao = "🛡️ *Perfil Conservador:* " + sugestao.replace(/\d+%/, "90% na primeira categoria, 10% na segunda");
+      } else if (perfilUsuario === "agressivo") {
+        sugestao = "⚡ *Perfil Agressivo:* " + sugestao.replace(/\d+%/, "inverta os percentuais, com foco em ações e ETFs");
+      }
+      await sendZap(phone, `📊 *Sugestão de alocação para a meta "${meta.nome}"*\n\n${sugestao}\n\nLembre-se de ajustar conforme seu apetite ao risco. Consulte um especialista antes de investir.`);
     }
     else if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
@@ -972,6 +1158,10 @@ Agora, responda de acordo com a mensagem do usuário.`;
         await verificarLimiteCategoria(phone, data.categoria, valorLimpo);
       }
 
+      if (data.tipo === "Recebimento") {
+        await atualizarRendaMedia(phone);
+      }
+
       const emojiCategoria = EMOJIS_CATEGORIAS[data.categoria] || "🔖";
       const iconeTipo = data.tipo === "Gasto" ? "🟥 Despesa" : "🟩 Receita";
       const iconePago = isPago ? "✅" : "❌ (Pendente)";
@@ -1008,6 +1198,15 @@ function authMiddleware(req, res, next) {
   const token = req.query.token || req.headers['x-api-token'];
   if (!API_SECRET_TOKEN || token === API_SECRET_TOKEN) return next();
   res.status(401).json({ erro: "Não autorizado" });
+}
+
+// Middleware para verificar plano Black nas rotas de investimento
+async function checkInvestimentosPlan(req, res, next) {
+  const phone = req.params.phone || req.body.phone;
+  if (!phone) return res.status(400).json({ erro: "phone não fornecido" });
+  const user = await User.findOne({ phone });
+  if (user && user.plano === 'black') return next();
+  res.status(403).json({ erro: "Plano Black necessário para acessar investimentos" });
 }
 
 // Rota para sincronizar plano e dados do usuário a partir do Stripe
@@ -1175,8 +1374,8 @@ app.post("/api/limites/categoria", authMiddleware, async (req, res) => {
   }
 });
 
-// ================= ROTAS DE INVESTIMENTOS, METAS E APORTES =================
-app.get("/api/investimentos/:phone", authMiddleware, async (req, res) => {
+// ================= ROTAS DE INVESTIMENTOS (PROTEGIDAS POR PLANO BLACK) =================
+app.get("/api/investimentos/:phone", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     const investimentos = await Investimento.find({ phone: req.params.phone });
     res.json(investimentos);
@@ -1185,7 +1384,7 @@ app.get("/api/investimentos/:phone", authMiddleware, async (req, res) => {
   }
 });
 
-app.get("/api/investimentos/distribuicao/:phone", authMiddleware, async (req, res) => {
+app.get("/api/investimentos/distribuicao/:phone", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     const phone = req.params.phone;
     const investimentos = await Investimento.find({ phone });
@@ -1211,7 +1410,7 @@ app.get("/api/investimentos/distribuicao/:phone", authMiddleware, async (req, re
   }
 });
 
-app.post("/api/investimentos", authMiddleware, async (req, res) => {
+app.post("/api/investimentos", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     const { phone, tipo, nome, quantidade, precoUnitario, valorAportado, dataCompra } = req.body;
     const investimento = await Investimento.create({
@@ -1225,7 +1424,7 @@ app.post("/api/investimentos", authMiddleware, async (req, res) => {
   }
 });
 
-app.put("/api/investimentos/:id", authMiddleware, async (req, res) => {
+app.put("/api/investimentos/:id", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     const { quantidade, precoUnitario, valorAtual } = req.body;
     const investimento = await Investimento.findByIdAndUpdate(
@@ -1239,7 +1438,7 @@ app.put("/api/investimentos/:id", authMiddleware, async (req, res) => {
   }
 });
 
-app.delete("/api/investimentos/:id", authMiddleware, async (req, res) => {
+app.delete("/api/investimentos/:id", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     await Investimento.findByIdAndDelete(req.params.id);
     res.json({ deleted: true });
@@ -1248,7 +1447,7 @@ app.delete("/api/investimentos/:id", authMiddleware, async (req, res) => {
   }
 });
 
-app.get("/api/metas/:phone", authMiddleware, async (req, res) => {
+app.get("/api/metas/:phone", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     const metas = await Meta.find({ phone: req.params.phone });
     res.json(metas);
@@ -1257,16 +1456,17 @@ app.get("/api/metas/:phone", authMiddleware, async (req, res) => {
   }
 });
 
-app.post("/api/metas", authMiddleware, async (req, res) => {
+app.post("/api/metas", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
-    const { phone, nome, valorObjetivo, prazoAnos, taxaAnual } = req.body;
+    const { phone, nome, valorObjetivo, prazoAnos, taxaAnual, investimentoId } = req.body;
     const jurosMensal = Math.pow(1 + (taxaAnual / 100), 1/12) - 1;
     const n = prazoAnos * 12;
     let aporteMensal = (valorObjetivo * jurosMensal) / (Math.pow(1 + jurosMensal, n) - 1);
     if (!isFinite(aporteMensal)) aporteMensal = valorObjetivo / n;
     const meta = await Meta.create({
       phone, nome, valorObjetivo, prazoAnos, taxaAnual,
-      aporteMensalSugerido: parseFloat(aporteMensal.toFixed(2))
+      aporteMensalSugerido: parseFloat(aporteMensal.toFixed(2)),
+      investimentoId: investimentoId || null
     });
     res.json(meta);
   } catch (err) {
@@ -1274,7 +1474,7 @@ app.post("/api/metas", authMiddleware, async (req, res) => {
   }
 });
 
-app.delete("/api/metas/:id", authMiddleware, async (req, res) => {
+app.delete("/api/metas/:id", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     await Meta.findByIdAndDelete(req.params.id);
     res.json({ deleted: true });
@@ -1283,26 +1483,7 @@ app.delete("/api/metas/:id", authMiddleware, async (req, res) => {
   }
 });
 
-app.get("/api/planejamento/:phone", authMiddleware, async (req, res) => {
-  try {
-    const phone = req.params.phone;
-    const umAnoAtras = new Date();
-    umAnoAtras.setFullYear(umAnoAtras.getFullYear() - 1);
-    const transacoes = await Finance.find({ phone, data: { $gte: umAnoAtras } });
-    let receitas = 0, despesas = 0;
-    transacoes.forEach(t => {
-      if (t.tipo === "Recebimento") receitas += t.valor;
-      else if (t.tipo === "Gasto") despesas += t.valor;
-    });
-    const mediaMensalSobra = (receitas - despesas) / 12;
-    const sugestao = `Com base nos seus gastos dos últimos 12 meses, sua sobra média mensal é de R$ ${mediaMensalSobra.toFixed(2)}. Você pode começar investindo esse valor.`;
-    res.json({ mediaMensalSobra, sugestao });
-  } catch (err) {
-    res.status(500).json({ erro: err.message });
-  }
-});
-
-app.get("/api/aportes/:phone", authMiddleware, async (req, res) => {
+app.get("/api/aportes/:phone", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     const aportes = await Aporte.find({ phone: req.params.phone }).sort({ data: -1 });
     res.json(aportes);
@@ -1311,9 +1492,70 @@ app.get("/api/aportes/:phone", authMiddleware, async (req, res) => {
   }
 });
 
+app.get("/api/evolucao-patrimonio/:phone", authMiddleware, checkInvestimentosPlan, async (req, res) => {
+  try {
+    const historico = await PatrimonioHistorico.find({ phone: req.params.phone }).sort({ data: 1 });
+    res.json(historico);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.get("/api/renda-media/:phone", authMiddleware, checkInvestimentosPlan, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.params.phone });
+    res.json({ rendaMediaMensal: user?.rendaMediaMensal || 0 });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
 // ROTA DE SAÚDE
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
+});
+
+// --- CRON JOB PARA SNAPSHOTS DIÁRIOS (investimentos e patrimônio) ---
+cron.schedule('59 23 * * *', async () => {
+  console.log("Criando snapshots diários de investimentos e patrimônio...");
+  const users = await User.find({}, 'phone');
+  for (const user of users) {
+    const phone = user.phone;
+    const isBlack = await verificarPlanoInvestimentos(phone);
+    if (!isBlack) continue; // só cria snapshots para usuários Black (para não armazenar dados desnecessários)
+
+    const investimentos = await Investimento.find({ phone });
+    for (const inv of investimentos) {
+      await HistoricoInvestimento.create({
+        phone,
+        investimentoId: inv._id,
+        data: new Date(),
+        valorAtual: inv.valorAtual
+      });
+    }
+    let patrimonioInvest = 0;
+    for (const inv of investimentos) patrimonioInvest += inv.valorAtual;
+    const walletSaldo = await Wallet.aggregate([
+      { $match: { phone } },
+      { $group: { _id: null, total: { $sum: "$saldo" } } }
+    ]);
+    const saldoWallets = walletSaldo[0]?.total || 0;
+    const patrimonioTotal = patrimonioInvest + saldoWallets;
+    const diaAnterior = new Date();
+    diaAnterior.setDate(diaAnterior.getDate() - 1);
+    const registroAnterior = await PatrimonioHistorico.findOne({ phone, data: { $gte: diaAnterior } }).sort({ data: -1 });
+    let rentabilidade = 0;
+    if (registroAnterior && registroAnterior.patrimonioTotal > 0) {
+      rentabilidade = ((patrimonioTotal - registroAnterior.patrimonioTotal) / registroAnterior.patrimonioTotal) * 100;
+    }
+    await PatrimonioHistorico.create({
+      phone,
+      data: new Date(),
+      patrimonioTotal,
+      rentabilidadePeriodo: rentabilidade
+    });
+  }
+  console.log("Snapshots concluídos.");
 });
 
 // --- CRON JOB (recorrências, lembretes, parcelas e fatura) ---
