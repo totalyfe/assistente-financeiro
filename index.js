@@ -24,13 +24,14 @@ mongoose.connect(MONGODB_URI)
 
 // --- CONFIGURAÇÃO DE EMOJIS CENTRALIZADA ---
 const EMOJIS_CATEGORIAS = { 
-  "Mercado": "🛒", "Transporte": "🚗", "Lazer": "🍺", "Saúde": "💊", "Aluguel": "🏠",
+  "Mercado": "🛒", "Transporte": "🚗", "Lazer e Entretenimento": "🍺", "Saúde": "💊", "Aluguel": "🏠",
   "Educação": "📚", "Casa": "🏠", "Salário": "💰", "Alimentação": "🧃", "Recebimento": "💰", 
-  "Pix": "💸", "Internet": "🛜", "Pet": "🐶", "Padaria": "🥖", "Assinaturas": "📺", "Outros": "📦" 
+  "Transferências": "🔄", "Internet": "🛜", "Pet": "🐶", "Padaria": "🥖", "Assinaturas": "📺", "Vestuário": "👕",
+  "Impostos": "📉", "Viagem": "✈️", "Doações": "🏷️", "Outros": "📦" 
 };
 
 // --- TEXTOS DE AJUDA ---
-const HELP_TEXT = `━━━━━━━━━━━━━━━
+const HELP_TEXT = `━━━━━━━━━━
 
 💸 *Lançamentos rápidos*
 - Pode enviar *texto ou áudio*
@@ -50,7 +51,7 @@ Uso *hoje automaticamente*
 - Gastei 50 no mercado
 - Comprei um lanche por 25 na padaria
 
-━━━━━━━━━━━━━━━
+━━━━━━━━━━
 
 🔍 *Buscar gastos*
 - "gastos"
@@ -61,12 +62,12 @@ Uso *hoje automaticamente*
 - "excluir última"
 - "excluir transação ABC12"
 
-━━━━━━━━━━━━━━━
+━━━━━━━━━━
 
 🗂 *Organização automática*
 - Eu classifico tudo sozinho por categoria ✅
 
-━━━━━━━━━━━━━━━
+━━━━━━━━━━
 
 🏦 *Contas (bancos)*
 - "nubank 1000"
@@ -79,7 +80,7 @@ Uso *hoje automaticamente*
 - "pagar parcela da [desc]"
 - "definir fatura dia 15"
 
-━━━━━━━━━━━━━━━
+━━━━━━━━━━
 
 💸 *Transferências*
 - "transferir 200 do nubank pro inter"
@@ -100,11 +101,11 @@ Uso *hoje automaticamente*
 🧠 *Análise inteligente*
 - "analisar"
 
-🚀 Bora começar? Me manda seu primeiro lançamento!
+🚀 Vamos começar? Me manda seu primeiro lançamento!
 
-━━━━━━━━━━━━━━━`;
+━━━━━━━━━━`;
 
-const WELCOME_TEXT = `👴 *Fala, %nome%! Eu sou o Zeca do Caixa!* 💰
+const WELCOME_TEXT = `👋 *Olá %nome%! Seja muito bem vindo(a), eu sou a Sora!* 💰
 
 Vou te ensinar rapidinho como organizar sua vida financeira aqui no WhatsApp 👇
 
@@ -258,7 +259,7 @@ function detectarCategoria(msg) {
   const m = msg.toLowerCase();
   if (m.includes("mercado")) return "Mercado";
   if (m.match(/(uber|99|gasolina|combustivel|posto|carro)/i)) return "Transporte";
-  if (m.match(/(pizza|lanche|ifood|restaurante|comer|janta)/i)) return "Alimentação";
+  if (m.match(/(pizza|lanche|restaurante|comer|janta)/i)) return "Alimentação";
   if (m.match(/(netflix|spotify|prime|hbo|disney)/i)) return "Assinaturas";
   if (m.match(/(farmacia|remedio|medico|hospital|saude)/i)) return "Saúde";
   if (m.includes("aluguel")) return "Aluguel";
@@ -266,6 +267,7 @@ function detectarCategoria(msg) {
   if (m.match(/(internet|wifi|wi-fi|vivo|claro|tim)/i)) return "Internet";
   if (m.match(/(pet|dog|gato|racao|veterinario)/i)) return "Pet";
   if (m.match(/(lazer|cerveja|breja|role|cinema)/i)) return "Lazer";
+  if (m.includes("pix")) return "Transferências";
   return "Outros";
 }
 
@@ -419,7 +421,7 @@ app.post("/webhook", async (req, res) => {
       message = await transcreverAudio(audio.audioUrl, phone);
       console.log(`Zeca ouviu: "${message}"`);
     } catch (err) {
-      await sendZap(phone, "Ih, meu filho... não entendi seu áudio.");
+      await sendZap(phone, "Não consegui compreender seu áudio, pode repetir?");
       return;
     }
   }
@@ -1067,6 +1069,7 @@ async function criarCategoriasPadrao(phone) {
   const count = await Categoria.countDocuments({ phone });
   console.log(`📊 Count: ${count}`);
   if (count === 0) {
+    // 1. Criar categorias principais a partir do EMOJIS_CATEGORIAS
     const categoriasPadrao = Object.keys(EMOJIS_CATEGORIAS).map(nome => ({
       phone,
       nome,
@@ -1074,8 +1077,106 @@ async function criarCategoriasPadrao(phone) {
       ativa: true,
       parent: null
     }));
-    await Categoria.insertMany(categoriasPadrao);
-    console.log(`📂 Categorias padrão criadas para ${phone} (${categoriasPadrao.length} categorias)`);
+    const inserted = await Categoria.insertMany(categoriasPadrao);
+    console.log(`📂 Categorias principais criadas para ${phone} (${inserted.length} categorias)`);
+
+    // 2. Mapear nome da categoria -> _id
+    const mapa = {};
+    for (const cat of inserted) {
+      mapa[cat.nome] = cat._id;
+    }
+
+    // 3. Criar subcategorias
+    const subcategorias = [];
+
+    // Assinaturas
+    if (mapa["Assinaturas"]) {
+      const subs = ["Netflix", "HBO Max", "Disney+", "Globo Play", "Prime Video", "IPTV", "Spotify"];
+      for (const sub of subs) {
+        subcategorias.push({
+          phone,
+          nome: sub,
+          icone: "📺",
+          parent: mapa["Assinaturas"],
+          ativa: true
+        });
+      }
+    }
+
+    // Vestuário
+    if (mapa["Vestuário"]) {
+      const subs = ["Shein", "Adidas", "Nike"];
+      for (const sub of subs) {
+        subcategorias.push({
+          phone,
+          nome: sub,
+          icone: "👕",
+          parent: mapa["Vestuário"],
+          ativa: true
+        });
+      }
+    }
+
+    // Alimentação
+    if (mapa["Alimentação"]) {
+      const subs = ["Fastfood"];
+      for (const sub of subs) {
+        subcategorias.push({
+          phone,
+          nome: sub,
+          icone: "🍔",
+          parent: mapa["Alimentação"],
+          ativa: true
+        });
+      }
+    }
+
+    // Casa
+    if (mapa["Casa"]) {
+      const subs = ["Conta de luz", "Conta de água", "Gás"];
+      for (const sub of subs) {
+        subcategorias.push({
+          phone,
+          nome: sub,
+          icone: "🏡",
+          parent: mapa["Casa"],
+          ativa: true
+        });
+      }
+    }
+
+    // Lazer e Entretenimento
+    if (mapa["Lazer e Entretenimento"]) {
+      const subs = ["Festas"];
+      for (const sub of subs) {
+        subcategorias.push({
+          phone,
+          nome: sub,
+          icone: "🎉",
+          parent: mapa["Lazer e Entretenimento"],
+          ativa: true
+        });
+      }
+    }
+
+    // Transferências (nova categoria principal - você já tem "Transferências" no EMOJIS_CATEGORIAS)
+    if (mapa["Transferências"]) {
+      const subs = ["PIX", "TED", "DOC", "Boleto", "Transferência entre contas"];
+      for (const sub of subs) {
+        subcategorias.push({
+          phone,
+          nome: sub,
+          icone: sub === "PIX" ? "💸" : (sub === "Boleto" ? "📄" : "🔄"),
+          parent: mapa["Transferências"],
+          ativa: true
+        });
+      }
+    }
+
+    if (subcategorias.length) {
+      await Categoria.insertMany(subcategorias);
+      console.log(`📂 Subcategorias criadas para ${phone} (${subcategorias.length} subcategorias)`);
+    }
     return true;
   }
   console.log(`⚠️ Categorias já existem para ${phone}`);
@@ -1096,4 +1197,4 @@ async function criarCategoriasPadrao(phone) {
 })();
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Bot Zeca do Caixa rodando na porta ${PORT} 🚀`));
+app.listen(PORT, () => console.log(`Bot Sora rodando na porta ${PORT} 🚀`));
