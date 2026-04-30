@@ -225,7 +225,8 @@ const Aporte = mongoose.model("Aporte", new mongoose.Schema({
   phone: String,
   data: { type: Date, default: Date.now },
   valor: Number,
-  investimentoId: { type: mongoose.Schema.Types.ObjectId, ref: "Investimento" }
+  investimentoId: { type: mongoose.Schema.Types.ObjectId, ref: "Investimento" },
+  descricao: { type: String, default: "" }
 }));
 
 const Meta = mongoose.model("Meta", new mongoose.Schema({
@@ -528,6 +529,8 @@ Você deve responder de forma natural, amigável e útil, sempre em português.
    - Para listar investimentos/metas: {"acao": "listar_investimentos"} ou {"acao": "listar_metas"}
    - Para deletar: {"acao": "deletar_investimento", "id": "id_do_investimento"} ou {"acao": "deletar_meta", "id": "id_da_meta"}
    - Para obter planejamento baseado em gastos: {"acao": "planejamento"}
+   - Para registrar um aporte: {"acao": "registrar_aporte", "valor": 500, "investimentoId": "id_do_investimento (opcional)", "descricao": "Aporte mensal"}
+   - Para listar aportes: {"acao": "listar_aportes"}
 3. Se a conversa for genérica (como "oi", "obrigado", "como você está?"), responda normalmente como uma assistente simpática.
 4. **NUNCA** inclua texto fora do JSON quando for executar uma ação. Apenas o JSON.
 5. Se não souber o que fazer, pergunte de forma educada o que o usuário deseja.
@@ -801,7 +804,7 @@ Agora, responda de acordo com a mensagem do usuário.`;
       });
       await sendZap(phone, `🔔 Lembrete criado: ${data.tipo === "pagar" ? "🔴 Pagar" : "🟢 Receber"} *${data.descricao}* no valor de R$ ${data.valor.toFixed(2)} até ${dataVenc.toLocaleDateString('pt-BR')}.`);
     }
-    // ========== NOVAS AÇÕES DE INVESTIMENTOS E METAS ==========
+    // ========== NOVAS AÇÕES DE INVESTIMENTOS, METAS E APORTES ==========
     else if (data.acao === "criar_investimento") {
       const { tipo, nome, valorAportado, quantidade, precoUnitario } = data;
       const investimento = await Investimento.create({
@@ -832,14 +835,22 @@ Agora, responda de acordo com a mensagem do usuário.`;
         await sendZap(phone, "Você ainda não tem nenhum investimento cadastrado. Diga 'criar investimento' para começar.");
       } else {
         let totalInv = 0, totalAtual = 0;
+        const agrupado = {};
         let msg = "📈 *SEUS INVESTIMENTOS:*\n\n";
         for (const i of invs) {
           totalInv += i.valorAportado;
           totalAtual += i.valorAtual;
           msg += `💰 *${i.nome}* (${i.tipo})\nAportado: R$ ${i.valorAportado} | Atual: R$ ${i.valorAtual}\nRent: ${((i.rentabilidade||0)*100).toFixed(1)}%\n\n`;
+          const tipo = i.tipo;
+          agrupado[tipo] = (agrupado[tipo] || 0) + (i.valorAtual || i.valorAportado);
         }
-        const rendTotal = ((totalAtual - totalInv) / totalInv) * 100;
-        msg += `*TOTAL:* Aportado R$ ${totalInv} | Atual R$ ${totalAtual} | Rent. Total ${rendTotal.toFixed(2)}%`;
+        const rendTotal = totalInv > 0 ? ((totalAtual - totalInv) / totalInv) * 100 : 0;
+        msg += `*TOTAL:* Aportado R$ ${totalInv} | Atual R$ ${totalAtual} | Rent. Total ${rendTotal.toFixed(2)}%\n\n`;
+        msg += "📊 *DISTRIBUIÇÃO DA CARTEIRA:*\n";
+        for (const [tipo, valor] of Object.entries(agrupado)) {
+          const percentual = (valor / totalAtual) * 100;
+          msg += `${tipo}: R$ ${valor} (${percentual.toFixed(1)}%)\n`;
+        }
         await sendZap(phone, msg);
       }
     }
@@ -877,6 +888,51 @@ Agora, responda de acordo com a mensagem do usuário.`;
       const result = await Meta.findByIdAndDelete(id);
       if (result) await sendZap(phone, `🗑️ Meta "${result.nome}" removida.`);
       else await sendZap(phone, "Meta não encontrada.");
+    }
+    else if (data.acao === "registrar_aporte") {
+      const { valor, investimentoId, descricao } = data;
+      if (!valor || valor <= 0) {
+        await sendZap(phone, "❌ Valor do aporte inválido.");
+        return;
+      }
+      const aporte = await Aporte.create({
+        phone,
+        valor,
+        investimentoId: investimentoId || null,
+        descricao: descricao || "Aporte realizado",
+        data: new Date()
+      });
+      // Se informou um investimentoId, atualiza o valorAportado e valorAtual do investimento
+      if (investimentoId) {
+        const inv = await Investimento.findById(investimentoId);
+        if (inv) {
+          const novoValorAportado = inv.valorAportado + valor;
+          const novoValorAtual = inv.valorAtual + valor;
+          await Investimento.findByIdAndUpdate(investimentoId, {
+            valorAportado: novoValorAportado,
+            valorAtual: novoValorAtual
+          });
+          await sendZap(phone, `💰 Aporte de R$ ${valor.toFixed(2)} registrado para o investimento "${inv.nome}". Saldo atualizado: R$ ${novoValorAtual.toFixed(2)}.`);
+        } else {
+          await sendZap(phone, `💰 Aporte de R$ ${valor.toFixed(2)} registrado (investimento não encontrado, mas o aporte foi salvo).`);
+        }
+      } else {
+        await sendZap(phone, `💰 Aporte de R$ ${valor.toFixed(2)} registrado com sucesso.`);
+      }
+    }
+    else if (data.acao === "listar_aportes") {
+      const aportes = await Aporte.find({ phone }).sort({ data: -1 }).limit(10);
+      if (aportes.length === 0) {
+        await sendZap(phone, "Nenhum aporte registrado ainda. Use 'registrar aporte' para começar.");
+      } else {
+        let msg = "📊 *HISTÓRICO DE APORTES (últimos 10):*\n\n";
+        for (const ap of aportes) {
+          const dataStr = new Date(ap.data).toLocaleDateString('pt-BR');
+          const invInfo = ap.investimentoId ? ` (Investimento ID: ${ap.investimentoId})` : "";
+          msg += `📅 ${dataStr}: R$ ${ap.valor.toFixed(2)}${invInfo} - ${ap.descricao}\n`;
+        }
+        await sendZap(phone, msg);
+      }
     }
     else if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
@@ -1139,6 +1195,37 @@ app.get("/api/investimentos/:phone", authMiddleware, async (req, res) => {
   }
 });
 
+// Distribuição da carteira por tipo de ativo
+app.get("/api/investimentos/distribuicao/:phone", authMiddleware, async (req, res) => {
+  try {
+    const phone = req.params.phone;
+    const investimentos = await Investimento.find({ phone });
+    
+    if (investimentos.length === 0) {
+      return res.json({ distribui: [], total: 0 });
+    }
+    
+    const agrupado = {};
+    let total = 0;
+    for (const inv of investimentos) {
+      const tipo = inv.tipo;
+      const valorAtual = inv.valorAtual || inv.valorAportado;
+      agrupado[tipo] = (agrupado[tipo] || 0) + valorAtual;
+      total += valorAtual;
+    }
+    
+    const distribui = Object.keys(agrupado).map(tipo => ({
+      tipo,
+      valor: agrupado[tipo],
+      percentual: total > 0 ? (agrupado[tipo] / total) * 100 : 0
+    })).sort((a,b) => b.percentual - a.percentual);
+    
+    res.json({ distribui, total });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
 app.post("/api/investimentos", authMiddleware, async (req, res) => {
   try {
     const { phone, tipo, nome, quantidade, precoUnitario, valorAportado, dataCompra } = req.body;
@@ -1225,6 +1312,16 @@ app.get("/api/planejamento/:phone", authMiddleware, async (req, res) => {
     const mediaMensalSobra = (receitas - despesas) / 12;
     const sugestao = `Com base nos seus gastos dos últimos 12 meses, sua sobra média mensal é de R$ ${mediaMensalSobra.toFixed(2)}. Você pode começar investindo esse valor.`;
     res.json({ mediaMensalSobra, sugestao });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Rota para listar aportes (usada pelo painel)
+app.get("/api/aportes/:phone", authMiddleware, async (req, res) => {
+  try {
+    const aportes = await Aporte.find({ phone: req.params.phone }).sort({ data: -1 });
+    res.json(aportes);
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
@@ -1342,46 +1439,4 @@ async function criarCategoriasPadrao(phone) {
     }
     if (mapa["Casa"]) {
       const subs = ["Conta de luz", "Conta de água", "Gás"];
-      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "🏡", parent: mapa["Casa"], ativa: true });
-    }
-    if (mapa["Lazer e Entretenimento"]) {
-      const subs = ["Festas"];
-      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "🎉", parent: mapa["Lazer e Entretenimento"], ativa: true });
-    }
-    if (mapa["Transferências"]) {
-      const subs = ["PIX", "TED", "DOC", "Boleto", "Transferência entre contas"];
-      for (const sub of subs) {
-        subcategorias.push({
-          phone, nome: sub,
-          icone: sub === "PIX" ? "💸" : (sub === "Boleto" ? "📄" : "🔄"),
-          parent: mapa["Transferências"],
-          ativa: true
-        });
-      }
-    }
-
-    if (subcategorias.length) {
-      await Categoria.insertMany(subcategorias);
-      console.log(`📂 Subcategorias criadas para ${phone} (${subcategorias.length} subcategorias)`);
-    }
-    return true;
-  }
-  console.log(`⚠️ Categorias já existem para ${phone}`);
-  return false;
-}
-
-// Executar para todos os usuários existentes (somente uma vez na inicialização)
-(async () => {
-  try {
-    const users = await User.find({}, 'phone');
-    for (const user of users) {
-      await criarCategoriasPadrao(user.phone);
-    }
-    console.log('✅ Verificação de categorias padrão concluída.');
-  } catch (err) {
-    console.error('Erro ao criar categorias padrão:', err);
-  }
-})();
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Bot Sora rodando na porta ${PORT} 🚀`));
+      for (const sub of subs) subcategorias.push({ phone, nome
