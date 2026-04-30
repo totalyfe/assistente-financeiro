@@ -189,18 +189,18 @@ const Parcela = mongoose.model("Parcela", new mongoose.Schema({
   parcelasPagas: { type: Number, default: 0 },
   dataProximaVencimento: Date,
   categoria: String,
-  carteira: String, // nome da conta de crédito (ex: "Nubank Crédito")
+  carteira: String,
   ativa: { type: Boolean, default: true }
 }));
 
-// --- NOVO MODELO PARA CATEGORIAS PERSONALIZADAS (COM SUB CATEGORIAS) ---
+// --- MODELO PARA CATEGORIAS PERSONALIZADAS ---
 const Categoria = mongoose.model("Categoria", new mongoose.Schema({
   phone: String,
   nome: { type: String, required: true },
   parent: { type: mongoose.Schema.Types.ObjectId, ref: "Categoria" },
   icone: { type: String, default: "📦" },
-  cor: { type: String, default: "#808080" },      // <-- NOVO
-  arquivada: { type: Boolean, default: false },   // <-- NOVO
+  cor: { type: String, default: "#808080" },
+  arquivada: { type: Boolean, default: false },
   ativa: { type: Boolean, default: true }
 }));
 
@@ -218,7 +218,7 @@ const Investimento = mongoose.model("Investimento", new mongoose.Schema({
   valorAportado: { type: Number, default: 0 },
   dataCompra: { type: Date, default: Date.now },
   valorAtual: { type: Number, default: 0 },
-  rentabilidade: { type: Number, default: 0 } // percentual decimal (ex: 0.08 = 8%)
+  rentabilidade: { type: Number, default: 0 }
 }));
 
 const Aporte = mongoose.model("Aporte", new mongoose.Schema({
@@ -310,13 +310,11 @@ function detectarCategoria(msg) {
 function interpretarRapido(message) {
   const msg = message.toLowerCase();
 
-  // DELETAR CONTA
   const deletarContaMatch = msg.match(/deletar\s+conta\s+(.+)/i);
   if (deletarContaMatch) {
     return { acao: "deletar_conta", nome: deletarContaMatch[1].trim().toUpperCase() };
   }
 
-  // COMPRA PARCELADA
   const parceladoMatch = msg.match(/(?:comprei|fiz uma compra de)\s+(.+?)\s+(?:no|na|pelo)\s+([a-zà-ú\s]+(?: crédito)?)\s+em\s+(\d+)x\s+de\s+(\d+(?:[.,]\d{2})?)/i);
   if (parceladoMatch) {
     const descricao = parceladoMatch[1].trim();
@@ -335,19 +333,16 @@ function interpretarRapido(message) {
     };
   }
 
-  // PAGAR PARCELA
   const pagarParcelaMatch = msg.match(/pagar\s+parcela\s+da\s+(.+)/i);
   if (pagarParcelaMatch) {
     return { acao: "pagar_parcela", descricao: pagarParcelaMatch[1].trim() };
   }
 
-  // DEFINIR DIA DA FATURA
   const faturaDiaMatch = msg.match(/definir\s+fatura\s+dia\s+(\d{1,2})/i);
   if (faturaDiaMatch) {
     return { acao: "set_fatura_dia", dia: parseInt(faturaDiaMatch[1]) };
   }
 
-  // GASTO À VISTA (crédito ou débito)
   const gastoMatch = msg.match(/(gastei|paguei|comprei)\s+(\d+(?:[.,]\d{2})?)\s+(?:em\s+|no\s+|na\s+)?([a-zà-ú\s]+?)(?:\s+(?:no|na|pelo)\s+([a-z0-9à-ú\s]+))?$/i);
   if (gastoMatch) {
     let categoriaTexto = gastoMatch[3] ? gastoMatch[3].trim() : "Outros";
@@ -369,7 +364,6 @@ function interpretarRapido(message) {
     };
   }
 
-  // RECEITA
   const receitaMatch = msg.match(/(ganhei|recebi|caiu|depositaram)\s+(\d+(?:[.,]\d{2})?)(?:\s+(?:no|na|pelo)\s+([a-z0-9à-ú\s]+))?/i);
   if (receitaMatch) {
     return {
@@ -384,7 +378,6 @@ function interpretarRapido(message) {
     };
   }
 
-  // CRIAÇÃO/CONFIGURAÇÃO DE CONTA (ex: "nubank 1000", "nubank crédito 500")
   const setWalletMatch = msg.match(/^([a-zà-ú\s]+(?: crédito)?)\s+(\d+(?:[.,]\d{2})?)$/i);
   if (setWalletMatch) {
     let nomeConta = setWalletMatch[1].trim();
@@ -393,7 +386,6 @@ function interpretarRapido(message) {
     return { acao: "set_wallet", nome: nomeConta, valor: valor };
   }
 
-  // COMANDOS GERAIS
   if (msg.includes("painel")) return { acao: "painel" };
   if (msg.match(/(funções|funcoes|ajuda|help|menu|o que você faz)/i)) return { acao: "ajuda" };
   const metaMatch = msg.match(/meta\s+(\d+(?:[.,]\d{2})?)/i);
@@ -485,7 +477,6 @@ app.post("/webhook", async (req, res) => {
 
     let data = interpretarRapido(message);
     if (!data) {
-      // ========== BUSCAR DADOS DO USUÁRIO PARA O GPT ==========
       const investimentos = await Investimento.find({ phone });
       const metas = await Meta.find({ phone });
       const saldoGeral = await Wallet.aggregate([
@@ -804,7 +795,7 @@ Agora, responda de acordo com a mensagem do usuário.`;
       });
       await sendZap(phone, `🔔 Lembrete criado: ${data.tipo === "pagar" ? "🔴 Pagar" : "🟢 Receber"} *${data.descricao}* no valor de R$ ${data.valor.toFixed(2)} até ${dataVenc.toLocaleDateString('pt-BR')}.`);
     }
-    // ========== NOVAS AÇÕES DE INVESTIMENTOS, METAS E APORTES ==========
+    // ========== AÇÕES DE INVESTIMENTOS, METAS E APORTES ==========
     else if (data.acao === "criar_investimento") {
       const { tipo, nome, valorAportado, quantidade, precoUnitario } = data;
       const investimento = await Investimento.create({
@@ -902,7 +893,6 @@ Agora, responda de acordo com a mensagem do usuário.`;
         descricao: descricao || "Aporte realizado",
         data: new Date()
       });
-      // Se informou um investimentoId, atualiza o valorAportado e valorAtual do investimento
       if (investimentoId) {
         const inv = await Investimento.findById(investimentoId);
         if (inv) {
@@ -1013,7 +1003,7 @@ Agora, responda de acordo com a mensagem do usuário.`;
   }
 });
 
-// --- ROTAS DA API PROTEGIDAS (incluindo as novas de investimentos e metas) ---
+// --- ROTAS DA API PROTEGIDAS ---
 function authMiddleware(req, res, next) {
   const token = req.query.token || req.headers['x-api-token'];
   if (!API_SECRET_TOKEN || token === API_SECRET_TOKEN) return next();
@@ -1185,7 +1175,7 @@ app.post("/api/limites/categoria", authMiddleware, async (req, res) => {
   }
 });
 
-// ================= ROTAS DE INVESTIMENTOS E METAS =================
+// ================= ROTAS DE INVESTIMENTOS, METAS E APORTES =================
 app.get("/api/investimentos/:phone", authMiddleware, async (req, res) => {
   try {
     const investimentos = await Investimento.find({ phone: req.params.phone });
@@ -1195,16 +1185,13 @@ app.get("/api/investimentos/:phone", authMiddleware, async (req, res) => {
   }
 });
 
-// Distribuição da carteira por tipo de ativo
 app.get("/api/investimentos/distribuicao/:phone", authMiddleware, async (req, res) => {
   try {
     const phone = req.params.phone;
     const investimentos = await Investimento.find({ phone });
-    
     if (investimentos.length === 0) {
       return res.json({ distribui: [], total: 0 });
     }
-    
     const agrupado = {};
     let total = 0;
     for (const inv of investimentos) {
@@ -1213,13 +1200,11 @@ app.get("/api/investimentos/distribuicao/:phone", authMiddleware, async (req, re
       agrupado[tipo] = (agrupado[tipo] || 0) + valorAtual;
       total += valorAtual;
     }
-    
     const distribui = Object.keys(agrupado).map(tipo => ({
       tipo,
       valor: agrupado[tipo],
       percentual: total > 0 ? (agrupado[tipo] / total) * 100 : 0
     })).sort((a,b) => b.percentual - a.percentual);
-    
     res.json({ distribui, total });
   } catch (err) {
     res.status(500).json({ erro: err.message });
@@ -1317,7 +1302,6 @@ app.get("/api/planejamento/:phone", authMiddleware, async (req, res) => {
   }
 });
 
-// Rota para listar aportes (usada pelo painel)
 app.get("/api/aportes/:phone", authMiddleware, async (req, res) => {
   try {
     const aportes = await Aporte.find({ phone: req.params.phone }).sort({ data: -1 });
@@ -1340,7 +1324,6 @@ cron.schedule('0 * * * *', async () => {
   const inicioHoje = new Date(); inicioHoje.setHours(0,0,0,0);
   const fimHoje = new Date(); fimHoje.setHours(23,59,59,999);
 
-  // Recorrências
   const contasHoje = await Recorrencia.find({ diaVencimento: dia, ativa: true });
   for (const conta of contasHoje) {
     const jaLancado = await Finance.findOne({ phone: conta.phone, categoria: conta.categoria, valor: conta.valor, data: { $gte: inicioHoje, $lte: fimHoje } });
@@ -1353,7 +1336,6 @@ cron.schedule('0 * * * *', async () => {
     }
   }
 
-  // Lembretes antecipados
   const amanha = new Date(); amanha.setDate(hoje.getDate() + 1);
   const proximosDias = [hoje, amanha];
   for (const diaRef of proximosDias) {
@@ -1368,7 +1350,6 @@ cron.schedule('0 * * * *', async () => {
     }
   }
 
-  // Parcelas vencendo hoje
   const parcelasVencendo = await Parcela.find({ dataProximaVencimento: { $lte: hoje }, ativa: true });
   for (const parcela of parcelasVencendo) {
     if (parcela.parcelasPagas < parcela.totalParcelas) {
@@ -1376,7 +1357,6 @@ cron.schedule('0 * * * *', async () => {
     }
   }
 
-  // Fatura consolidada (dia de fechamento)
   const users = await User.find({ diaFechamentoFatura: { $exists: true } });
   for (const user of users) {
     if (hoje.getDate() === user.diaFechamentoFatura) {
@@ -1397,7 +1377,6 @@ cron.schedule('0 * * * *', async () => {
         observacao: { $regex: /Crédito/i }
       });
       for (const c of comprasAvista) totalFatura += c.valor;
-      
       await sendZap(user.phone, `💳 *FATURA DO CARTÃO* - Período: ${inicioPeriodo.toLocaleDateString()} a ${fimPeriodo.toLocaleDateString()}\nValor total: R$ ${totalFatura.toFixed(2)}\nVencimento: aproximadamente dia ${user.diaFechamentoFatura+5}.\nPara pagar, use "transferir ${totalFatura.toFixed(2)} do [conta_debito] para [conta_credito]".`);
       user.ultimoFechamento = hoje;
       await user.save();
@@ -1439,4 +1418,45 @@ async function criarCategoriasPadrao(phone) {
     }
     if (mapa["Casa"]) {
       const subs = ["Conta de luz", "Conta de água", "Gás"];
-      for (const sub of subs) subcategorias.push({ phone, nome
+      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "🏡", parent: mapa["Casa"], ativa: true });
+    }
+    if (mapa["Lazer e Entretenimento"]) {
+      const subs = ["Festas"];
+      for (const sub of subs) subcategorias.push({ phone, nome: sub, icone: "🎉", parent: mapa["Lazer e Entretenimento"], ativa: true });
+    }
+    if (mapa["Transferências"]) {
+      const subs = ["PIX", "TED", "DOC", "Boleto", "Transferência entre contas"];
+      for (const sub of subs) {
+        subcategorias.push({
+          phone, nome: sub,
+          icone: sub === "PIX" ? "💸" : (sub === "Boleto" ? "📄" : "🔄"),
+          parent: mapa["Transferências"],
+          ativa: true
+        });
+      }
+    }
+    if (subcategorias.length) {
+      await Categoria.insertMany(subcategorias);
+      console.log(`📂 Subcategorias criadas para ${phone} (${subcategorias.length} subcategorias)`);
+    }
+    return true;
+  }
+  console.log(`⚠️ Categorias já existem para ${phone}`);
+  return false;
+}
+
+// Executar para todos os usuários existentes (somente uma vez na inicialização)
+(async () => {
+  try {
+    const users = await User.find({}, 'phone');
+    for (const user of users) {
+      await criarCategoriasPadrao(user.phone);
+    }
+    console.log('✅ Verificação de categorias padrão concluída.');
+  } catch (err) {
+    console.error('Erro ao criar categorias padrão:', err);
+  }
+})();
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Bot Sora rodando na porta ${PORT} 🚀`));
