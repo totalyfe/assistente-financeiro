@@ -1759,6 +1759,16 @@ app.get("/api/renda-media/:phone", authMiddleware, checkInvestimentosPlan, async
   }
 });
 
+app.get("/api/grupo/:id", authMiddleware, async (req, res) => {
+  try {
+    const grupo = await Grupo.findById(req.params.id).populate('membros.userId', 'name phone');
+    if (!grupo) return res.status(404).json({ erro: "Grupo não encontrado" });
+    res.json(grupo);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
 // ROTA DE SAÚDE
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
@@ -1956,6 +1966,125 @@ async function criarCategoriasPadrao(grupoId) {
   console.log(`⚠️ Categorias já existem para grupo ${grupoId}`);
   return false;
 }
+// Rota para obter o perfil do usuário (incluindo grupo ativo)
+app.get("/api/user/:phone", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.params.phone }).populate('grupoAtivo');
+    if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
+    res.json({ phone: user.phone, name: user.name, plano: user.plano, grupoAtivo: user.grupoAtivo });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Rota para listar todos os grupos do usuário
+app.get("/api/meus-grupos/:phone", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.params.phone });
+    if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
+    const grupos = await Grupo.find({ "membros.userId": user._id });
+    res.json(grupos);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Rota para trocar o grupo ativo
+app.post("/api/trocar-grupo", authMiddleware, async (req, res) => {
+  try {
+    const { phone, grupoId } = req.body;
+    const user = await User.findOne({ phone });
+    if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
+    // Verificar se o usuário pertence ao grupo
+    const grupo = await Grupo.findById(grupoId);
+    if (!grupo) return res.status(404).json({ erro: "Grupo não encontrado" });
+    if (!grupo.membros.some(m => m.userId.toString() === user._id.toString())) {
+      return res.status(403).json({ erro: "Você não faz parte deste grupo" });
+    }
+    user.grupoAtivo = grupoId;
+    await user.save();
+    res.json({ ok: true, grupoAtivo: grupoId });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Rota para gerar código de convite (admin)
+app.post("/api/convidar-grupo", authMiddleware, async (req, res) => {
+  try {
+    const { phone, grupoId } = req.body;
+    const user = await User.findOne({ phone });
+    if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
+    const grupo = await Grupo.findById(grupoId);
+    if (!grupo) return res.status(404).json({ erro: "Grupo não encontrado" });
+    if (grupo.donoId.toString() !== user._id.toString()) {
+      return res.status(403).json({ erro: "Apenas o administrador pode gerar convites" });
+    }
+    const codigo = nanoid(6).toUpperCase();
+    await Convite.create({
+      grupoId: grupo._id,
+      codigo,
+      criadoPor: user._id,
+      expiraEm: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    });
+    res.json({ codigo });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Rota para aceitar convite (entrar em grupo)
+app.post("/api/aceitar-convite", authMiddleware, async (req, res) => {
+  try {
+    const { phone, codigo } = req.body;
+    const user = await User.findOne({ phone });
+    if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
+    const convite = await Convite.findOne({ codigo, usado: false, expiraEm: { $gt: new Date() } });
+    if (!convite) return res.status(400).json({ erro: "Código inválido ou expirado" });
+    const grupo = await Grupo.findById(convite.grupoId);
+    if (!grupo) return res.status(404).json({ erro: "Grupo não encontrado" });
+    const dono = await User.findById(grupo.donoId);
+    let maxMembros = 1;
+    if (dono.plano === 'premium') maxMembros = 3;
+    else if (dono.plano === 'black') maxMembros = 5;
+    if (grupo.membros.length >= maxMembros) {
+      return res.status(400).json({ erro: `Limite de membros atingido (${maxMembros})` });
+    }
+    if (grupo.membros.some(m => m.userId.toString() === user._id.toString())) {
+      return res.status(400).json({ erro: "Você já está neste grupo" });
+    }
+    grupo.membros.push({ userId: user._id, papel: "escrita" });
+    await grupo.save();
+    convite.usado = true;
+    await convite.save();
+    user.grupoAtivo = grupo._id;
+    await user.save();
+    res.json({ ok: true, grupo });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Rota para remover membro (admin)
+app.post("/api/remover-membro", authMiddleware, async (req, res) => {
+  try {
+    const { phone, grupoId, membroId } = req.body;
+    const user = await User.findOne({ phone });
+    if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
+    const grupo = await Grupo.findById(grupoId);
+    if (!grupo) return res.status(404).json({ erro: "Grupo não encontrado" });
+    if (grupo.donoId.toString() !== user._id.toString()) {
+      return res.status(403).json({ erro: "Apenas o administrador pode remover membros" });
+    }
+    const membro = grupo.membros.find(m => m.userId.toString() === membroId);
+    if (!membro) return res.status(404).json({ erro: "Membro não encontrado" });
+    grupo.membros = grupo.membros.filter(m => m.userId.toString() !== membroId);
+    await grupo.save();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
 
 // --- MIGRAÇÃO DE DADOS EXISTENTES (executa uma vez na inicialização) ---
 (async () => {
