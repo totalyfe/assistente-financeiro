@@ -119,7 +119,7 @@ const Grupo = mongoose.model("Grupo", new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     papel: { type: String, enum: ["admin", "leitura", "escrita"], default: "escrita" }
   }],
-  codigoConvite: { type: String, unique: true, sparse: true },
+  codigoConvite: { type: String, sparse: true, unique: true },
   createdAt: { type: Date, default: Date.now }
 }));
 
@@ -2089,20 +2089,33 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
 // --- MIGRAÇÃO DE DADOS EXISTENTES (executa uma vez na inicialização) ---
 (async () => {
   try {
-    // Para cada usuário sem grupo, criar grupo pessoal e migrar seus dados
+    // Remove o índice único problemático se existir (opcional, mas seguro)
+    try {
+      await Grupo.collection.dropIndex('codigoConvite_1');
+      console.log("✅ Índice antigo removido.");
+    } catch (e) { /* índice não existia */ }
+
+    // Recria o índice com sparse
+    await Grupo.collection.createIndex({ codigoConvite: 1 }, { sparse: true, unique: true });
+    console.log("✅ Índice corrigido.");
+
     const users = await User.find({});
     for (const user of users) {
       if (!user.grupoAtivo) {
-        const grupo = await Grupo.create({
-          nome: "Pessoal",
-          donoId: user._id,
-          membros: [{ userId: user._id, papel: "admin" }],
-          codigoConvite: null
-        });
+        // Verificar se já existe um grupo pessoal para este usuário (pelo donoId)
+        let grupo = await Grupo.findOne({ donoId: user._id, nome: "Pessoal" });
+        if (!grupo) {
+          grupo = await Grupo.create({
+            nome: "Pessoal",
+            donoId: user._id,
+            membros: [{ userId: user._id, papel: "admin" }],
+            codigoConvite: null  // explícito
+          });
+        }
         user.grupoAtivo = grupo._id;
         await user.save();
 
-        // Migrar wallets
+        // Migrar dados (apenas se não tiverem sido migrados)
         await Wallet.updateMany({ phone: user.phone }, { grupoId: grupo._id });
         await Finance.updateMany({ phone: user.phone }, { grupoId: grupo._id });
         await Recorrencia.updateMany({ phone: user.phone }, { grupoId: grupo._id });
@@ -2116,7 +2129,6 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
         await HistoricoInvestimento.updateMany({ phone: user.phone }, { grupoId: grupo._id });
         await PatrimonioHistorico.updateMany({ phone: user.phone }, { grupoId: grupo._id });
 
-        // Criar categorias padrão para o grupo
         await criarCategoriasPadrao(grupo._id);
       }
     }
