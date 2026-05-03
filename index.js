@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 const { 
-  OPENAI_API_KEY, ZAPI_TOKEN, ZAPI_INSTANCE, MONGODB_URI, ZAPI_CLIENT_TOKEN, API_SECRET_TOKEN 
+  OPENAI_API_KEY, ZAPI_TOKEN, ZAPI_INSTANCE, MONGODB_URI, ZAPI_CLIENT_TOKEN, API_SECRET_TOKEN, GOOGLE_CLOUD_API_KEY
 } = process.env;
 
 if (!API_SECRET_TOKEN) console.warn("⚠️ API_SECRET_TOKEN não definido. Rotas da API estarão desprotegidas.");
@@ -346,6 +346,67 @@ async function transcreverAudio(audioUrl, phone) {
   }
 }
 
+// ========== FUNÇÃO PARA OCR COM GOOGLE CLOUD VISION (USANDO API KEY) ==========
+async function processarNotaFiscalComGoogleVision(imageUrl) {
+  if (!GOOGLE_CLOUD_API_KEY) {
+    console.warn("Google Cloud API key não configurada");
+    return null;
+  }
+  try {
+    // Baixar a imagem
+    const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    const imageBase64 = Buffer.from(imageResponse.data).toString('base64');
+
+    // Chamar a API REST do Google Cloud Vision
+    const visionUrl = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_CLOUD_API_KEY}`;
+    const requestBody = {
+      requests: [{
+        image: { content: imageBase64 },
+        features: [{ type: "TEXT_DETECTION" }]
+      }]
+    };
+
+    const response = await axios.post(visionUrl, requestBody, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const textAnnotations = response.data.responses[0]?.textAnnotations;
+    if (!textAnnotations || textAnnotations.length === 0) {
+      console.log("Nenhum texto encontrado na imagem");
+      return null;
+    }
+
+    const fullText = textAnnotations[0].description;
+    console.log("Texto extraído da nota fiscal:", fullText);
+
+    // Extrair valor (prioriza padrão com R$)
+    let valor = null;
+    let valorMatch = fullText.match(/R?\$?\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))/i);
+    if (!valorMatch) {
+      valorMatch = fullText.match(/(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2}))/);
+    }
+    if (valorMatch) {
+      let valorStr = valorMatch[1].replace(/\./g, '').replace(',', '.');
+      valor = parseFloat(valorStr);
+    }
+
+    // Extrair estabelecimento (primeira linha não vazia)
+    const linhas = fullText.split('\n').filter(l => l.trim().length > 0);
+    const estabelecimento = linhas[0]?.trim() || "Compra";
+
+    return {
+      valor,
+      estabelecimento,
+      texto: fullText,
+      categoria: detectarCategoria(estabelecimento)
+    };
+  } catch (err) {
+    console.error("Erro no OCR com Google Cloud Vision:", err.message);
+    if (err.response) console.error("Detalhe do erro da API:", err.response.data);
+    return null;
+  }
+}
+
 function detectarCategoria(msg) {
   const m = msg.toLowerCase();
   if (m.includes("mercado")) return "Mercado";
@@ -516,7 +577,7 @@ async function atualizarRendaMedia(grupoId) {
 
 // ========== WEBHOOK PRINCIPAL (adaptado para grupos) ==========
 app.post("/webhook", async (req, res) => {
-  const { phone, text, listResponseMessage, audio, fromMe } = req.body;
+  const { phone, text, listResponseMessage, audio, image, fromMe } = req.body;
   res.sendStatus(200);
   if (fromMe === true) return;
 
@@ -528,6 +589,33 @@ app.post("/webhook", async (req, res) => {
       console.log(`Sora ouviu: "${message}"`);
     } catch (err) {
       await sendZap(phone, "Não consegui compreender seu áudio, pode repetir?");
+      return;
+    }
+  }
+
+  // --- PROCESSAMENTO DE IMAGEM (nota fiscal) - APENAS PARA PLANOS PREMIUM OU BLACK ---
+  if (image && image.url && GOOGLE_CLOUD_API_KEY) {
+    // Verificar plano do usuário (buscar no banco)
+    const user = await User.findOne({ phone });
+    const isPremiumOrBlack = user && (user.plano === 'premium' || user.plano === 'black');
+    
+    if (!isPremiumOrBlack) {
+      await sendZap(phone, "🚫 A funcionalidade de leitura de notas fiscais está disponível apenas nos planos Premium e Black. Faça upgrade pelo nosso painel.");
+      return;
+    }
+
+    try {
+      const ocrResult = await processarNotaFiscalComGoogleVision(image.url);
+      if (ocrResult && ocrResult.valor && ocrResult.valor > 0) {
+        message = `gastei ${ocrResult.valor.toFixed(2)} ${ocrResult.estabelecimento}`;
+        console.log(`Imagem processada: valor ${ocrResult.valor} - ${ocrResult.estabelecimento}`);
+      } else {
+        await sendZap(phone, "Não consegui identificar o valor da nota fiscal. Por favor, registre manualmente com 'gastei valor descrição'.");
+        return;
+      }
+    } catch (err) {
+      console.error("Erro ao processar imagem:", err);
+      await sendZap(phone, "Erro ao processar a imagem. Tente novamente ou registre manualmente.");
       return;
     }
   }
@@ -2137,6 +2225,22 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
     console.error("Erro durante migração de grupos:", err);
   }
 })();
+
+// ========== IMPORTAÇÃO OFX (somente Premium/Black) ==========
+app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
+  try {
+    const { phone } = req.body;
+    const user = await User.findOne({ phone });
+    if (!user || (user.plano !== 'premium' && user.plano !== 'black')) {
+      return res.status(403).json({ erro: "Funcionalidade exclusiva para planos Premium e Black" });
+    }
+    // Aqui virá a lógica de processamento do arquivo OFX
+    // (parsear, extrair transações, salvar no grupo do usuário)
+    res.json({ msg: "Funcionalidade OFX em desenvolvimento. Em breve!" });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Bot Sora rodando na porta ${PORT} 🚀`));
