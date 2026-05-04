@@ -461,7 +461,16 @@ function interpretarRapido(message) {
     return { acao: "remover_membro", nome: removerMembroMatch[1].trim() };
   }
 
-  // --- Comandos existentes (resumidos) ---
+  const recorrenteMatch = msg.match(/todo\s+mês\s+(\d+(?:[.,]\d{2})?)\s+(.+?)\s+dia\s+(\d{1,2})/i);
+  if (recorrenteMatch) {
+    return {
+      acao: "set_recorrente",
+      valor: parseFloat(recorrenteMatch[1].replace(',', '.')),
+      descricao: recorrenteMatch[2].trim(),
+      dia: parseInt(recorrenteMatch[3])
+    };
+  }
+
   const deletarContaMatch = msg.match(/deletar\s+conta\s+(.+)/i);
   if (deletarContaMatch) {
     return { acao: "deletar_conta", nome: deletarContaMatch[1].trim().toUpperCase() };
@@ -483,6 +492,11 @@ function interpretarRapido(message) {
   if (pagarParcelaMatch) {
     return { acao: "pagar_parcela", descricao: pagarParcelaMatch[1].trim() };
   }
+  // 🆕 NOVO: Capturar confirmação de pagamento de parcela
+const parcelaPagaMatch = msg.match(/parcela\s+paga\s+(.+)/i);
+if (parcelaPagaMatch) {
+  return { acao: "confirmar_pagamento_parcela", descricao: parcelaPagaMatch[1].trim() };
+}
   const faturaDiaMatch = msg.match(/definir\s+fatura\s+dia\s+(\d{1,2})/i);
   if (faturaDiaMatch) {
     return { acao: "set_fatura_dia", dia: parseInt(faturaDiaMatch[1]) };
@@ -1128,6 +1142,44 @@ if (data.acao === "conversa") {
       const valorParcela = parcela.valorParcela;
       await sendZap(phone, `💳 Para pagar a parcela ${parcela.parcelasPagas+1}/${parcela.totalParcelas} de R$ ${valorParcela.toFixed(2)} da compra "${parcela.descricao}", transfira esse valor da sua conta débito para a conta ${parcela.carteira} usando:\n\n"transferir ${valorParcela.toFixed(2)} do [sua_conta] para ${parcela.carteira}"\n\nApós a transferência, me avise "parcela paga ${descricao}" para eu atualizar.`);
     }
+    else if (data.acao === "confirmar_pagamento_parcela") {
+  const descricao = data.descricao;
+  
+  // Buscar a parcela ativa
+  const parcela = await Parcela.findOne({ 
+    grupoId: grupoAtual._id, 
+    descricao: { $regex: new RegExp(descricao, 'i') }, 
+    ativa: true
+  });
+  
+  if (!parcela) {
+    await sendZap(phone, `❌ Não encontrei nenhuma parcela pendente para "${descricao}". Verifique o nome.`);
+    return;
+  }
+  
+  // Verificar se todas as parcelas já foram pagas
+  if (parcela.parcelasPagas >= parcela.totalParcelas) {
+    await sendZap(phone, `✅ A compra "${parcela.descricao}" já está totalmente quitada.`);
+    return;
+  }
+  
+  // Incrementar parcelas pagas
+  parcela.parcelasPagas += 1;
+  
+  // Verificar se completou
+  if (parcela.parcelasPagas >= parcela.totalParcelas) {
+    parcela.ativa = false;
+    await parcela.save();
+    await sendZap(phone, `🎉 Parabéns! Você quitou todas as parcelas de "${parcela.descricao}". Obrigado por usar o Sora! 🎉`);
+  } else {
+    // Atualizar data da próxima vencimento para +30 dias
+    const novaData = new Date();
+    novaData.setDate(novaData.getDate() + 30);
+    parcela.dataProximaVencimento = novaData;
+    await parcela.save();
+    await sendZap(phone, `✅ Parcela ${parcela.parcelasPagas}/${parcela.totalParcelas} da compra "${parcela.descricao}" foi confirmada como paga. Próxima parcela vence em ${novaData.toLocaleDateString('pt-BR')}.`);
+  }
+}
     else if (data.acao === "apagar") {
       let excluido;
       if (data.idCurto) {
