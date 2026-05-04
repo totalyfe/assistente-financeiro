@@ -1718,12 +1718,15 @@ async function checkInvestimentosPlan(req, res, next) {
   res.status(403).json({ erro: "Plano Black necessário para acessar investimentos" });
 }
 
-// Helper para obter grupoId a partir do phone do usuário
+// Helper para obter grupoId a partir do phone (cria usuário/grupo se não existir)
 async function getGrupoFromPhone(phone) {
   let user = await User.findOne({ phone });
-  if (!user) return null;
+  if (!user) {
+    // Cria usuário automaticamente com nome genérico (pode ser alterado depois)
+    user = await User.create({ phone, name: "Usuário do Painel" });
+    console.log(`✅ Usuário ${phone} criado automaticamente pelo painel.`);
+  }
   
-  // Se não tiver grupo ativo, criar um grupo pessoal
   if (!user.grupoAtivo) {
     const grupo = await Grupo.create({
       nome: "Pessoal",
@@ -1734,7 +1737,7 @@ async function getGrupoFromPhone(phone) {
     user.grupoAtivo = grupo._id;
     await user.save();
     
-    // Migrar dados antigos (caso existam transações com phone, mas sem grupoId)
+    // Migrar dados antigos (caso existam transações com phone, sem grupoId)
     await Wallet.updateMany({ phone }, { grupoId: grupo._id });
     await Finance.updateMany({ phone }, { grupoId: grupo._id });
     await Recorrencia.updateMany({ phone }, { grupoId: grupo._id });
