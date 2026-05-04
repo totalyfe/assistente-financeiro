@@ -186,7 +186,9 @@ const CategoryLimit = mongoose.model("CategoryLimit", new mongoose.Schema({
   grupoId: { type: mongoose.Schema.Types.ObjectId, ref: "Grupo", required: true },
   categoria: String,
   limiteMensal: Number,
-  mesReferencia: { type: String, default: () => new Date().toISOString().slice(0,7) }
+  mesReferencia: { type: String, default: () => new Date().toISOString().slice(0,7) },
+  percentualAlerta: { type: Number, default: 80 },
+  alertaEnviado: { type: Boolean, default: false }
 }));
 
 const Reminder = mongoose.model("Reminder", new mongoose.Schema({
@@ -425,7 +427,10 @@ function detectarCategoria(msg) {
 
 function interpretarRapido(message) {
   const msg = message.toLowerCase();
-
+// ⭐ NOVO: Detectar pedido de dicas
+  if (msg.match(/dicas|economizar|sugestões|como economizar|me ajuda a economizar/i)) {
+    return { acao: "gerar_dicas" };
+  }
   // --- Comandos de grupo ---
   const criarGrupoMatch = msg.match(/criar\s+grupo\s+(.+)/i);
   if (criarGrupoMatch) {
@@ -540,20 +545,33 @@ function interpretarRapido(message) {
   return null;
 }
 
-async function verificarLimiteCategoria(grupoId, categoria, valorGasto) {
-  const inicioMes = new Date(); inicioMes.setDate(1); inicioMes.setHours(0,0,0,0);
+async function verificarLimiteCategoria(grupoId, categoria, valorGasto, phone) {
+  const inicioMes = new Date();
+  inicioMes.setDate(1);
+  inicioMes.setHours(0, 0, 0, 0);
+
+  // Total de gastos no mês para a categoria
   const gastosMes = await Finance.aggregate([
     { $match: { grupoId, categoria, tipo: "Gasto", data: { $gte: inicioMes } } },
     { $group: { _id: null, total: { $sum: "$valor" } } }
   ]);
   const totalAtual = gastosMes[0]?.total || 0;
   const novoTotal = totalAtual + valorGasto;
-  const limiteDoc = await CategoryLimit.findOne({ grupoId, categoria, mesReferencia: new Date().toISOString().slice(0,7) });
+
+  // Busca o limite configurado para esta categoria no mês atual
+  const mesRef = new Date().toISOString().slice(0, 7);
+  const limiteDoc = await CategoryLimit.findOne({ grupoId, categoria, mesReferencia: mesRef });
+
   if (limiteDoc && limiteDoc.limiteMensal > 0) {
     const percentual = (novoTotal / limiteDoc.limiteMensal) * 100;
-    if (novoTotal > limiteDoc.limiteMensal) {
-      // enviar alerta para todos os membros? por simplicidade, só para quem registrou
-      // Mas aqui não temos o phone, então a função será chamada com grupoId e precisaremos do phone para enviar. Ajuste: passar phone também.
+    const alertaPercent = limiteDoc.percentualAlerta || 80;
+
+    // Só envia alerta se atingiu o percentual e ainda não foi enviado este mês
+    if (percentual >= alertaPercent && !limiteDoc.alertaEnviado) {
+      await sendZap(phone, `⚠️ *Atenção!* Você atingiu ${percentual.toFixed(0)}% do limite de *${categoria}*.\nLimite: R$ ${limiteDoc.limiteMensal.toFixed(2)} | Gasto atual: R$ ${novoTotal.toFixed(2)}`);
+      
+      // Marca o alerta como enviado para não repetir
+      await CategoryLimit.updateOne({ _id: limiteDoc._id }, { alertaEnviado: true });
     }
   }
 }
@@ -573,6 +591,60 @@ async function atualizarRendaMedia(grupoId) {
   // Não há um campo rendaMediaMensal por grupo; seria necessário armazenar no grupo ou recalcular sempre. Por simplicidade, vamos manter a lógica antiga (baseada no phone) mas agora usaremos grupoId.
   // Para não complicar, criamos uma coleção separada? Por ora, ignoramos ou mantemos no usuário (mas grupo pode ter múltiplos usuários). Deixaremos como estava (phone) - não é ideal, mas para MVP.
   // Vamos pular essa atualização por enquanto.
+}
+
+// - - - DICAS FINANCEIRAS - - -
+async function gerarDicasFinanceiras(grupoId, phone) {
+  // Buscar transações dos últimos 30 dias
+  const trintaDiasAtras = new Date();
+  trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
+  
+  const transacoes = await Finance.find({
+    grupoId,
+    data: { $gte: trintaDiasAtras }
+  }).sort({ data: -1 });
+
+  if (transacoes.length === 0) {
+    return "Você ainda não tem transações nos últimos 30 dias. Registre alguns gastos para que eu possa te dar dicas personalizadas.";
+  }
+
+  // Agrupar gastos por categoria (apenas despesas)
+  const gastosPorCategoria = {};
+  let totalGastos = 0;
+  for (const t of transacoes) {
+    if (t.tipo === "Gasto") {
+      totalGastos += t.valor;
+      const cat = t.categoria;
+      gastosPorCategoria[cat] = (gastosPorCategoria[cat] || 0) + t.valor;
+    }
+  }
+
+  // Ordenar categorias por maior gasto
+  const categoriasOrdenadas = Object.entries(gastosPorCategoria)
+    .sort((a,b) => b[1] - a[1])
+    .slice(0, 5); // top 5
+
+  // Construir resumo para o GPT
+  let resumo = `Últimos 30 dias:\nTotal de gastos: R$ ${totalGastos.toFixed(2)}\n`;
+  for (const [cat, valor] of categoriasOrdenadas) {
+    resumo += `- ${cat}: R$ ${valor.toFixed(2)}\n`;
+  }
+
+  // Chamar o GPT para gerar dicas personalizadas
+  const prompt = `Você é um especialista em finanças pessoais. Com base no seguinte resumo de gastos de um usuário, gere **dicas práticas e específicas** para ele economizar dinheiro. Seja direto, amigável e evite conselhos genéricos. Aponte onde ele pode cortar gastos e sugira alternativas concretas.
+
+Resumo:
+${resumo}
+
+Dicas:`;
+
+  const response = await axios.post("https://api.openai.com/v1/chat/completions", {
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.7
+  }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
+
+  return response.data.choices[0].message.content;
 }
 
 // ========== WEBHOOK PRINCIPAL (adaptado para grupos) ==========
@@ -700,6 +772,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       const systemPrompt = `Você é a **Sora**, assistente financeira pessoal do grupo "${grupoAtual.nome}". 
+Abaixo está uma descrição completa das minhas funcionalidades. Use-a para responder perguntas dos usuários sobre como usar o bot.
 Você deve responder de forma natural, amigável e útil, sempre em português.
 
 **Dados atuais do grupo:**
@@ -723,6 +796,94 @@ Você deve responder de forma natural, amigável e útil, sempre em português.
 4. **NUNCA** inclua texto fora do JSON quando for executar uma ação.
 5. Se não souber o que fazer, pergunte educadamente.
 
+Descrição Mais Completa:
+1. REGISTRO DE TRANSAÇÕES (gastos/receitas)
+   - Por texto: "gastei 50 no mercado", "recebi 2000 de salário"
+   - Por áudio: envia áudio, Sora transcreve com Whisper e interpreta
+   - Por imagem (nota fiscal): tira foto, usa Google Cloud Vision para ler valor e estabelecimento; funcionalidade disponível apenas nos planos Premium e Black.
+   - Por importação OFX – também apenas Premium/Black.
+
+2. CONTAS BANCÁRIAS (wallets)
+   - Tipos: Corrente, Crédito, Poupança, Vale Alimentação, Dinheiro.
+   - Comandos: "nubank 1000" (cria conta com saldo), "adicionar 200 no inter", "mude meu saldo do nubank pra 2000", "saldo" (lista todas as contas), "transferir 200 do nubank pro inter".
+   - Limite de 3 contas por grupo no básico e contas ilimitadas no plano premium e black.
+
+3. CATEGORIAS
+   - Categorias padrão: Mercado, Transporte, Lazer e Entretenimento, Saúde, Aluguel, Educação, Casa, Salário, Alimentação, Recebimento, Transferências, Internet, Pet, Padaria, Assinaturas, Vestuário, Impostos, Viagem, Doações, Outros.
+   - Usuário pode criar categorias e subcategorias personalizadas via painel web.
+   - Subcategorias pré-definidas: Assinaturas (Netflix, HBO Max, Disney+, Globo Play, Prime Video, IPTV, Spotify), Vestuário (Shein, Adidas, Nike), Alimentação (Fastfood), Casa (conta de luz, água, gás), Lazer (Festas), Transferências (PIX, TED, DOC, Boleto, Transferência entre contas).
+
+4. LIMITES DE GASTOS
+   - Definir limite mensal por categoria: "limite mercado 500"
+   - Definir limite geral mensal: "limite 2000"
+   - Alertas de limite ao atingir 80%, 95% e 100% (via WhatsApp).
+
+5. PARCELAS E RECORRÊNCIAS
+   - Compras parceladas: "comprei [desc] no [cartão] em 3x de 140" (exclusivo para contas crédito).
+   - Pagar parcela: "pagar parcela da [desc]" (irá orientar a transferência).
+   - Contas fixas recorrentes: "todo mês 1000 aluguel dia 5" – registra automaticamente todo mês.
+
+6. LEMBRETES
+   - "lembrar pagar conta luz dia 10/05 valor 150" – envia alerta 2 dias antes e no vencimento.
+
+7. INVESTIMENTOS (exclusivo plano Black)
+   - Tipos de ativo: Tesouro Direto, CDB/CDI, Ações, FIIs, ETFs, Cripto, Previdência, Reserva de Emergência, Imóveis, Negócios próprios, Caixa.
+   - Comandos: "criar investimento de R$ 1000 em CDB", "listar investimentos", "deletar investimento [id]".
+   - Aportes: "registrar aporte de R$ 500 no CDB" (atualiza valor investido e atual). "listar aportes".
+   - Evolução patrimonial, rentabilidade, distribuição da carteira (gráficos no painel).
+   - Metas financeiras: "criar meta de R$ 50000 em 2 anos" – calcula aporte mensal necessário. "progresso meta [id]".
+   - Sugestão de alocação: "sugerir alocacao para meta [id] com perfil [conservador/moderado/agressivo]".
+
+8. GRUPOS E GESTÃO COMPARTILHADA
+   - Cada usuário pertence a um grupo. Por padrão, grupo pessoal é criado automaticamente.
+   - Comandos: "criar grupo Nome", "convidar grupo" (gera código), "entrar grupo CODIGO", "meus grupos", "trocar grupo Nome", "membros", "remover membro Nome".
+   - Permissões: admin (dono), escrita (pode adicionar transações), leitura (apenas visualiza).
+   - Limite de membros conforme plano do dono: Básico = 1, Premium = 3, Black = 5.
+
+9. PLANOS E ACESSO (baseado em assinatura Stripe)
+   - Básico: lançamentos ilimitados, até 3 contas bancárias, relatórios essenciais, lembretes de contas, Criação de categorias e subcategorias personalizadas, Controle de gastos via WhatsApp por texto e áudio, Gestão individual, Sistema web com gráficos interativos e gestão financeira, Alerta de limite de gastos, Limites de gastos por categoria, subcategoria e geral.
+   - Premium: Todas as funções do Básico, inclui contas e cartões ilimitados, dicas de economia, gestão compartilhada com suporte de até 3 membros, Metas compartilhadas (ex.: viagem), envio de notas fiscais, importação OFX, relatórios avançados, suporte prioritário,
+   - Black: tudo do Premium + central de investimentos completa (metas, aportes, projeções, gráficos, sugestão de alocação) + até 5 membros na gestão compartilhada com 1 usuário incluso sem custo adicional.
+   - Usuários sem plano ativo têm plano = 'inativo' e não podem usar funcionalidades pagas.
+
+10. PAINEL WEB
+    - Acessível via https://totalyfe.online
+    - Requer autenticação (Supabase) e vínculo do número do WhatsApp.
+    - Exibe gráficos, permite gerenciar contas, categorias, limites, investimentos, metas, etc.
+
+11. EXEMPLOS DE COMANDOS RÁPIDOS (reconhecidos por regex)
+    - "gastei 50 no mercado" → registra despesa.
+    - "recebi 2000 de salário" → registra receita.
+    - "nubank 1000" → cria conta Nubank com saldo 1000.
+    - "saldo" → lista todas as contas.
+    - "transferir 200 do nubank pro inter" → transfere.
+    - "limite 2000" → define limite de gastos.
+    - "limite mercado 500" → define limite mensal para mercado.
+    - "resumo" → mostra gastos por categoria do mês.
+    - "analisar" → análise simples dos últimos 7 dias (dica curta).
+    - "deletar conta nubank" → remove conta.
+    - "excluir transação ABC12" → remove transação pelo ID.
+
+12. TECNOLOGIAS E INTEGRAÇÕES
+    - WhatsApp via Z-API.
+    - OpenAI (GPT-4o-mini para interpretação e conversação; Whisper para áudio).
+    - Google Cloud Vision para OCR de notas fiscais.
+    - MongoDB para dados.
+    - Supabase para autenticação e perfis.
+    - Stripe para assinaturas.
+
+**Instruções de resposta:**
+1. Se o usuário pedir para **criar, alterar, listar, excluir** algo (investimentos, metas, transações, limites, etc.), responda **APENAS com um JSON** no formato das ações já definidas (criar_investimento, criar_meta, listar_investimentos, etc.).
+2. Se o usuário pedir **dicas financeiras** (ex: "me dê dicas para economizar", "como posso gastar menos?", "dicas"), você deve **simular** que está analisando os dados do grupo e gerar recomendações realistas com base nos valores fornecidos (saldo, gastos, etc.). Use os dados atuais para ser específico.
+   - Por exemplo, se o gasto com "Mercado" for alto, sugira comprar em atacado, evitar desperdícios.
+   - Se "Assinaturas" for significativo, sugere cancelar as não utilizadas.
+3. Se o usuário fizer uma **pergunta sobre o funcionamento do bot** (ex: "como registro um gasto?"), responda normalmente.
+4. Para **conversa genérica** (oi, obrigado), responda de forma amigável.
+5. **NUNCA** invente ações que não existem.
+6. Sempre priorize a utilidade e a objetividade
+
+Qualquer dúvida sobre como usar o bot ou sobre seus recursos, responda de forma clara e útil.
+
 Agora, responda de acordo com a mensagem do usuário.`;
 
       const response = await axios.post("https://api.openai.com/v1/chat/completions", {
@@ -742,6 +903,14 @@ Agora, responda de acordo com a mensagem do usuário.`;
         await sendZap(phone, aiReply);
         return;
       }
+
+      // ⭐ NOVO TRATAMENTO PARA RESPOSTA CONVERSACIONAL
+if (data.acao === "conversa") {
+  await sendZap(phone, data.resposta);
+  return;
+}
+// Se não for conversa, continua para as ações normais (criar_grupo, salvar, etc.)
+
     }
 
     const nomesOficiais = { 
@@ -1382,6 +1551,22 @@ Agora, responda de acordo com a mensagem do usuário.`;
       }
       await sendZap(phone, `📊 *Sugestão de alocação para a meta "${meta.nome}"*\n\n${sugestao}\n\nLembre-se de ajustar conforme seu apetite ao risco. Consulte um especialista antes de investir.`);
     }
+
+    else if (data.acao === "gerar_dicas") {
+  const isBlack = await verificarPlanoInvestimentos(phone);
+  if (!isBlack) {
+    await sendZap(phone, "🚫 A funcionalidade de dicas personalizadas está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
+    return;
+  }
+  const grupoId = await getGrupoFromPhone(phone);
+  if (!grupoId) {
+    await sendZap(phone, "Você não está vinculado a nenhum grupo. Use 'criar grupo' ou entre em um grupo primeiro.");
+    return;
+  }
+  const dicas = await gerarDicasFinanceiras(grupoId, phone);
+  await sendZap(phone, dicas);
+}
+
     else if (data.acao === "salvar") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
       let carteiraNormalizada = data.carteira ? data.carteira.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim() : "";
@@ -1427,7 +1612,7 @@ Agora, responda de acordo com a mensagem do usuário.`;
       }
 
       if (data.tipo === "Gasto") {
-        await verificarLimiteCategoria(grupoAtual._id, data.categoria, valorLimpo);
+        await verificarLimiteCategoria(grupoAtual._id, data.categoria, valorLimpo, phone);
       }
 
       if (data.tipo === "Recebimento") {
@@ -1687,13 +1872,20 @@ app.post("/api/limites/geral", authMiddleware, async (req, res) => {
 
 app.post("/api/limites/categoria", authMiddleware, async (req, res) => {
   try {
-    const { phone, categoria, limiteMensal } = req.body;
+    const { phone, categoria, limiteMensal, percentualAlerta } = req.body;  // <-- inclui percentualAlerta
     const grupoId = await getGrupoFromPhone(phone);
     if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
     const mesRef = new Date().toISOString().slice(0,7);
+    
+    // Prepara o objeto com os campos a serem atualizados
+    const updateData = { limiteMensal };
+    if (percentualAlerta !== undefined) {
+      updateData.percentualAlerta = percentualAlerta;
+    }
+    
     const limite = await CategoryLimit.findOneAndUpdate(
       { grupoId, categoria, mesReferencia: mesRef },
-      { limiteMensal },
+      updateData,
       { upsert: true, new: true }
     );
     res.json(limite);
@@ -1940,8 +2132,18 @@ cron.schedule('59 23 * * *', async () => {
 
 // --- CRON JOB (recorrências, lembretes, parcelas e fatura) ---
 cron.schedule('0 * * * *', async () => {
-  console.log("Processando tarefas agendadas...");
+  // ========== RESETAR ALERTAS DE LIMITE (apenas no dia 1) ==========
   const hoje = new Date();
+  if (hoje.getDate() === 1) {
+    const mesAtual = hoje.toISOString().slice(0,7);
+    await CategoryLimit.updateMany(
+      { mesReferencia: { $ne: mesAtual }, alertaEnviado: true },
+      { alertaEnviado: false }
+    );
+    console.log("✅ Alertas de limite resetados para o novo mês");
+  }
+  // ================================================================
+  console.log("Processando tarefas agendadas...");
   const dia = hoje.getDate();
   const inicioHoje = new Date(); inicioHoje.setHours(0,0,0,0);
   const fimHoje = new Date(); fimHoje.setHours(23,59,59,999);
