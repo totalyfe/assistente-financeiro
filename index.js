@@ -1483,8 +1483,38 @@ async function checkInvestimentosPlan(req, res, next) {
 
 // Helper para obter grupoId a partir do phone do usuário
 async function getGrupoFromPhone(phone) {
-  const user = await User.findOne({ phone });
-  if (!user || !user.grupoAtivo) return null;
+  let user = await User.findOne({ phone });
+  if (!user) return null;
+  
+  // Se não tiver grupo ativo, criar um grupo pessoal
+  if (!user.grupoAtivo) {
+    const grupo = await Grupo.create({
+      nome: "Pessoal",
+      donoId: user._id,
+      membros: [{ userId: user._id, papel: "admin" }],
+      codigoConvite: null
+    });
+    user.grupoAtivo = grupo._id;
+    await user.save();
+    
+    // Migrar dados antigos (caso existam transações com phone, mas sem grupoId)
+    await Wallet.updateMany({ phone }, { grupoId: grupo._id });
+    await Finance.updateMany({ phone }, { grupoId: grupo._id });
+    await Recorrencia.updateMany({ phone }, { grupoId: grupo._id });
+    await CategoryLimit.updateMany({ phone }, { grupoId: grupo._id });
+    await Reminder.updateMany({ phone }, { grupoId: grupo._id });
+    await Parcela.updateMany({ phone }, { grupoId: grupo._id });
+    await Categoria.updateMany({ phone }, { grupoId: grupo._id });
+    await Investimento.updateMany({ phone }, { grupoId: grupo._id });
+    await Aporte.updateMany({ phone }, { grupoId: grupo._id });
+    await Meta.updateMany({ phone }, { grupoId: grupo._id });
+    await HistoricoInvestimento.updateMany({ phone }, { grupoId: grupo._id });
+    await PatrimonioHistorico.updateMany({ phone }, { grupoId: grupo._id });
+    
+    // Criar categorias padrão para o novo grupo
+    await criarCategoriasPadrao(grupo._id);
+  }
+  
   return user.grupoAtivo;
 }
 
@@ -2057,10 +2087,48 @@ async function criarCategoriasPadrao(grupoId) {
 // Rota para obter o perfil do usuário (incluindo grupo ativo)
 app.get("/api/user/:phone", authMiddleware, async (req, res) => {
   try {
-    const user = await User.findOne({ phone: req.params.phone }).populate('grupoAtivo');
+    let user = await User.findOne({ phone: req.params.phone });
     if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
-    res.json({ phone: user.phone, name: user.name, plano: user.plano, grupoAtivo: user.grupoAtivo });
+    
+    // --- CRIA GRUPO PESSOAL SE NÃO EXISTIR ---
+    if (!user.grupoAtivo) {
+      const grupo = await Grupo.create({
+        nome: "Pessoal",
+        donoId: user._id,
+        membros: [{ userId: user._id, papel: "admin" }],
+        codigoConvite: null
+      });
+      user.grupoAtivo = grupo._id;
+      await user.save();
+      
+      // Migrar dados antigos (se houver transações com phone, mas sem grupoId)
+      await Wallet.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await Finance.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await Recorrencia.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await CategoryLimit.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await Reminder.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await Parcela.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await Categoria.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await Investimento.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await Aporte.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await Meta.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await HistoricoInvestimento.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      await PatrimonioHistorico.updateMany({ phone: user.phone }, { grupoId: grupo._id });
+      
+      // Criar categorias padrão para o novo grupo
+      await criarCategoriasPadrao(grupo._id);
+    }
+    
+    // Agora, buscar o usuário com o grupo populado
+    const userComGrupo = await User.findById(user._id).populate('grupoAtivo');
+    res.json({ 
+      phone: userComGrupo.phone, 
+      name: userComGrupo.name, 
+      plano: userComGrupo.plano, 
+      grupoAtivo: userComGrupo.grupoAtivo 
+    });
   } catch (err) {
+    console.error("Erro na rota /api/user/:phone:", err);
     res.status(500).json({ erro: err.message });
   }
 });
