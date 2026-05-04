@@ -119,7 +119,7 @@ const Grupo = mongoose.model("Grupo", new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     papel: { type: String, enum: ["admin", "leitura", "escrita"], default: "escrita" }
   }],
-  codigoConvite: { type: String, sparse: true, unique: true },
+  codigoConvite: { type: String, sparse: true },
   createdAt: { type: Date, default: Date.now }
 }));
 
@@ -1720,39 +1720,47 @@ async function checkInvestimentosPlan(req, res, next) {
 
 // Helper para obter grupoId a partir do phone (cria usuário/grupo se não existir)
 async function getGrupoFromPhone(phone) {
-  let user = await User.findOne({ phone });
+  // Normaliza o telefone (remove tudo que não é dígito)
+  const rawPhone = phone.replace(/\D/g, '');
+  
+  let user = await User.findOne({ phone: rawPhone });
   if (!user) {
-    // Cria usuário automaticamente com nome genérico (pode ser alterado depois)
-    user = await User.create({ phone, name: "Usuário do Painel" });
-    console.log(`✅ Usuário ${phone} criado automaticamente pelo painel.`);
+    // Cria usuário automaticamente se não existir
+    user = await User.create({ phone: rawPhone, name: "Usuário do Painel" });
+    console.log(`✅ Usuário ${rawPhone} criado automaticamente pelo getGrupoFromPhone.`);
   }
   
   if (!user.grupoAtivo) {
-    const grupo = await Grupo.create({
-      nome: "Pessoal",
-      donoId: user._id,
-      membros: [{ userId: user._id, papel: "admin" }],
-      codigoConvite: null
-    });
-    user.grupoAtivo = grupo._id;
-    await user.save();
-    
-    // Migrar dados antigos (caso existam transações com phone, sem grupoId)
-    await Wallet.updateMany({ phone }, { grupoId: grupo._id });
-    await Finance.updateMany({ phone }, { grupoId: grupo._id });
-    await Recorrencia.updateMany({ phone }, { grupoId: grupo._id });
-    await CategoryLimit.updateMany({ phone }, { grupoId: grupo._id });
-    await Reminder.updateMany({ phone }, { grupoId: grupo._id });
-    await Parcela.updateMany({ phone }, { grupoId: grupo._id });
-    await Categoria.updateMany({ phone }, { grupoId: grupo._id });
-    await Investimento.updateMany({ phone }, { grupoId: grupo._id });
-    await Aporte.updateMany({ phone }, { grupoId: grupo._id });
-    await Meta.updateMany({ phone }, { grupoId: grupo._id });
-    await HistoricoInvestimento.updateMany({ phone }, { grupoId: grupo._id });
-    await PatrimonioHistorico.updateMany({ phone }, { grupoId: grupo._id });
-    
-    // Criar categorias padrão para o novo grupo
-    await criarCategoriasPadrao(grupo._id);
+    try {
+      const grupo = await Grupo.create({
+        nome: "Pessoal",
+        donoId: user._id,
+        membros: [{ userId: user._id, papel: "admin" }],
+        codigoConvite: null
+      });
+      user.grupoAtivo = grupo._id;
+      await user.save();
+      
+      // Migrar dados antigos (se houver transações com phone, sem grupoId)
+      await Wallet.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await Finance.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await Recorrencia.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await CategoryLimit.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await Reminder.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await Parcela.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await Categoria.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await Investimento.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await Aporte.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await Meta.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await HistoricoInvestimento.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      await PatrimonioHistorico.updateMany({ phone: rawPhone }, { grupoId: grupo._id });
+      
+      await criarCategoriasPadrao(grupo._id);
+      console.log(`✅ Grupo criado para usuário ${rawPhone}`);
+    } catch (err) {
+      console.error(`❌ Erro ao criar grupo para ${rawPhone}:`, err);
+      throw new Error("Falha ao criar grupo");
+    }
   }
   
   return user.grupoAtivo;
@@ -2509,8 +2517,8 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
     } catch (e) { /* índice não existia */ }
 
     // Recria o índice com sparse
-    await Grupo.collection.createIndex({ codigoConvite: 1 }, { sparse: true, unique: true });
-    console.log("✅ Índice corrigido.");
+    await Grupo.collection.createIndex({ codigoConvite: 1 }, { sparse: true });
+    console.log("✅ Índice corrigido (sem unique).");
 
     const users = await User.find({});
     for (const user of users) {
