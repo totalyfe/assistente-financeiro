@@ -276,14 +276,23 @@ const PatrimonioHistorico = mongoose.model("PatrimonioHistorico", new mongoose.S
 }));
 
 // ========== FUNÇÕES AUXILIARES ==========
+
+// Normaliza telefone: remove tudo que não é dígito, mantém o código do país original
+function normalizarPhone(phone) {
+  if (!phone) return phone;
+  return phone.replace(/\D/g, '');
+}
+
 async function obterGrupoIdPorPhone(phone) {
-  const user = await User.findOne({ phone });
+  const normalizedPhone = normalizarPhone(phone);
+  const user = await User.findOne({ phone: normalizedPhone });
   if (!user || !user.grupoAtivo) return null;
   return user.grupoAtivo;
 }
 
 async function verificarPlanoInvestimentos(phone) {
-  const user = await User.findOne({ phone });
+  const normalizedPhone = normalizarPhone(phone);
+  const user = await User.findOne({ phone: normalizedPhone });
   return user && user.plano === 'black';
 }
 
@@ -663,7 +672,9 @@ Dicas:`;
 
 // ========== WEBHOOK PRINCIPAL (adaptado para grupos) ==========
 app.post("/webhook", async (req, res) => {
-  const { phone, text, listResponseMessage, audio, image, fromMe } = req.body;
+  let { phone, text, listResponseMessage, audio, image, fromMe } = req.body;
+  // Normaliza o telefone assim que chega
+  phone = normalizarPhone(phone);
   res.sendStatus(200);
   if (fromMe === true) return;
 
@@ -1711,8 +1722,9 @@ function authMiddleware(req, res, next) {
 
 // Middleware para verificar plano Black nas rotas de investimento
 async function checkInvestimentosPlan(req, res, next) {
-  const phone = req.params.phone || req.body.phone;
+  let phone = req.params.phone || req.body.phone;
   if (!phone) return res.status(400).json({ erro: "phone não fornecido" });
+  phone = normalizarPhone(phone);
   const user = await User.findOne({ phone });
   if (user && user.plano === 'black') return next();
   res.status(403).json({ erro: "Plano Black necessário para acessar investimentos" });
@@ -1720,8 +1732,7 @@ async function checkInvestimentosPlan(req, res, next) {
 
 // Helper para obter grupoId a partir do phone (cria usuário/grupo se não existir)
 async function getGrupoFromPhone(phone) {
-  // Normaliza o telefone (remove tudo que não é dígito)
-  const rawPhone = phone.replace(/\D/g, '');
+  const rawPhone = normalizarPhone(phone);
   
   let user = await User.findOne({ phone: rawPhone });
   if (!user) {
@@ -1818,13 +1829,13 @@ app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
 // Criar um novo grupo (via painel)
 app.post("/api/criar-grupo", authMiddleware, async (req, res) => {
   try {
-    const { phone, nome } = req.body;
+    let { phone, nome } = req.body;
     if (!phone || !nome) {
       return res.status(400).json({ erro: "phone e nome são obrigatórios" });
     }
 
     // Normaliza o telefone
-    const rawPhone = phone.replace(/\D/g, '');
+    const rawPhone = normalizarPhone(phone);
     let user = await User.findOne({ phone: rawPhone });
     if (!user) {
       return res.status(404).json({ erro: "Usuário não encontrado. Ele precisa ter interagido com o bot antes." });
@@ -1857,7 +1868,7 @@ app.post("/api/criar-grupo", authMiddleware, async (req, res) => {
   }
 });
 
-// ================= NOVAS ROTAS PARA O PAINEL LOVABLE (adaptadas para grupoId) =================
+// ================= NOVAS ROTAS PARA O PAINEL LOVABLE =================
 
 // --- CONTAS BANCÁRIAS (WALLETS) ---
 app.get("/api/wallets/:phone", authMiddleware, async (req, res) => {
@@ -1959,7 +1970,8 @@ app.get("/api/limites/:phone", authMiddleware, async (req, res) => {
   try {
     const grupoId = await getGrupoFromPhone(req.params.phone);
     if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
-    const user = await User.findOne({ phone: req.params.phone });
+    const rawPhone = normalizarPhone(req.params.phone);
+    const user = await User.findOne({ phone: rawPhone });
     const limitesCategoria = await CategoryLimit.find({ grupoId, mesReferencia: new Date().toISOString().slice(0,7) });
     res.json({ metaMensal: user?.metaMensal || 0, categorias: limitesCategoria });
   } catch (err) {
@@ -1979,17 +1991,14 @@ app.post("/api/limites/geral", authMiddleware, async (req, res) => {
 
 app.post("/api/limites/categoria", authMiddleware, async (req, res) => {
   try {
-    const { phone, categoria, limiteMensal, percentualAlerta } = req.body;  // <-- inclui percentualAlerta
+    const { phone, categoria, limiteMensal, percentualAlerta } = req.body;
     const grupoId = await getGrupoFromPhone(phone);
     if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
     const mesRef = new Date().toISOString().slice(0,7);
-    
-    // Prepara o objeto com os campos a serem atualizados
     const updateData = { limiteMensal };
     if (percentualAlerta !== undefined) {
       updateData.percentualAlerta = percentualAlerta;
     }
-    
     const limite = await CategoryLimit.findOneAndUpdate(
       { grupoId, categoria, mesReferencia: mesRef },
       updateData,
@@ -2001,7 +2010,7 @@ app.post("/api/limites/categoria", authMiddleware, async (req, res) => {
   }
 });
 
-// ================= ROTAS DE INVESTIMENTOS (PROTEGIDAS POR PLANO BLACK) =================
+// ================= ROTAS DE INVESTIMENTOS =================
 app.get("/api/investimentos/:phone", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     const grupoId = await getGrupoFromPhone(req.params.phone);
@@ -2128,7 +2137,6 @@ app.get("/api/aportes/:phone", authMiddleware, checkInvestimentosPlan, async (re
   }
 });
 
-// Rota para criar aporte via API (painel)
 app.post("/api/aportes", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
     const { phone, valor, investimentoId, descricao } = req.body;
@@ -2169,7 +2177,6 @@ app.get("/api/evolucao-patrimonio/:phone", authMiddleware, checkInvestimentosPla
 
 app.get("/api/renda-media/:phone", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
-    // A renda média não está implementada para grupo; retornamos 0 por enquanto
     res.json({ rendaMediaMensal: 0 });
   } catch (err) {
     res.status(500).json({ erro: err.message });
@@ -2186,16 +2193,14 @@ app.get("/api/grupo/:id", authMiddleware, async (req, res) => {
   }
 });
 
-// ROTA DE SAÚDE
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
 
-// --- CRON JOB PARA SNAPSHOTS DIÁRIOS (investimentos e patrimônio) ---
+// --- CRON JOB PARA SNAPSHOTS DIÁRIOS ---
 cron.schedule('59 23 * * *', async () => {
   console.log("Criando snapshots diários de investimentos e patrimônio...");
   const usuarios = await User.find({});
-  // Para cada usuário, pegar seu grupoAtivo
   const gruposProcessados = new Set();
   for (const user of usuarios) {
     const grupoId = user.grupoAtivo;
@@ -2239,7 +2244,6 @@ cron.schedule('59 23 * * *', async () => {
 
 // --- CRON JOB (recorrências, lembretes, parcelas e fatura) ---
 cron.schedule('0 * * * *', async () => {
-  // ========== RESETAR ALERTAS DE LIMITE (apenas no dia 1) ==========
   const hoje = new Date();
   if (hoje.getDate() === 1) {
     const mesAtual = hoje.toISOString().slice(0,7);
@@ -2249,7 +2253,6 @@ cron.schedule('0 * * * *', async () => {
     );
     console.log("✅ Alertas de limite resetados para o novo mês");
   }
-  // ================================================================
   console.log("Processando tarefas agendadas...");
   const dia = hoje.getDate();
   const inicioHoje = new Date(); inicioHoje.setHours(0,0,0,0);
@@ -2270,7 +2273,6 @@ cron.schedule('0 * * * *', async () => {
         observacao: `[Recorrente] ${conta.descricao || ''} [${carteiraAlvo}]`
       });
       await Wallet.findOneAndUpdate({ grupoId: conta.grupoId, nome: carteiraAlvo }, { $inc: { saldo: conta.tipo === "Gasto" ? -conta.valor : conta.valor } });
-      // Enviar notificação para os membros? Por simplicidade, apenas para o dono? Vamos buscar o dono do grupo
       const grupo = await Grupo.findById(conta.grupoId);
       if (grupo && grupo.donoId) {
         const dono = await User.findById(grupo.donoId);
@@ -2279,7 +2281,6 @@ cron.schedule('0 * * * *', async () => {
     }
   }
 
-  // Lembretes
   const lembretes = await Reminder.find({ dataVencimento: { $gte: inicioHoje, $lt: fimHoje }, enviado: false, ativo: true });
   for (const lembrete of lembretes) {
     const grupo = await Grupo.findById(lembrete.grupoId);
@@ -2291,7 +2292,6 @@ cron.schedule('0 * * * *', async () => {
     await lembrete.save();
   }
 
-  // Parcelas vencendo
   const parcelasVencendo = await Parcela.find({ dataProximaVencimento: { $lte: hoje }, ativa: true });
   for (const parcela of parcelasVencendo) {
     if (parcela.parcelasPagas < parcela.totalParcelas) {
@@ -2303,7 +2303,6 @@ cron.schedule('0 * * * *', async () => {
     }
   }
 
-  // Fatura consolidada (dia de fechamento) – não adaptado para grupo, mantido apenas para o dono
   const users = await User.find({ diaFechamentoFatura: { $exists: true } });
   for (const user of users) {
     if (hoje.getDate() === user.diaFechamentoFatura) {
@@ -2333,7 +2332,7 @@ cron.schedule('0 * * * *', async () => {
   }
 });
 
-// ========== POPULAR CATEGORIAS PADRÃO PARA GRUPO ==========
+// ========== POPULAR CATEGORIAS PADRÃO ==========
 async function criarCategoriasPadrao(grupoId) {
   console.log(`🔍 Verificando categorias para grupo ${grupoId}`);
   const count = await Categoria.countDocuments({ grupoId });
@@ -2393,13 +2392,14 @@ async function criarCategoriasPadrao(grupoId) {
   console.log(`⚠️ Categorias já existem para grupo ${grupoId}`);
   return false;
 }
+
 // Rota para obter o perfil do usuário (incluindo grupo ativo)
 app.get("/api/user/:phone", authMiddleware, async (req, res) => {
   try {
-    let user = await User.findOne({ phone: req.params.phone });
+    const rawPhone = normalizarPhone(req.params.phone);
+    let user = await User.findOne({ phone: rawPhone });
     if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
     
-    // --- CRIA GRUPO PESSOAL SE NÃO EXISTIR ---
     if (!user.grupoAtivo) {
       const grupo = await Grupo.create({
         nome: "Pessoal",
@@ -2410,7 +2410,6 @@ app.get("/api/user/:phone", authMiddleware, async (req, res) => {
       user.grupoAtivo = grupo._id;
       await user.save();
       
-      // Migrar dados antigos (se houver transações com phone, mas sem grupoId)
       await Wallet.updateMany({ phone: user.phone }, { grupoId: grupo._id });
       await Finance.updateMany({ phone: user.phone }, { grupoId: grupo._id });
       await Recorrencia.updateMany({ phone: user.phone }, { grupoId: grupo._id });
@@ -2424,11 +2423,9 @@ app.get("/api/user/:phone", authMiddleware, async (req, res) => {
       await HistoricoInvestimento.updateMany({ phone: user.phone }, { grupoId: grupo._id });
       await PatrimonioHistorico.updateMany({ phone: user.phone }, { grupoId: grupo._id });
       
-      // Criar categorias padrão para o novo grupo
       await criarCategoriasPadrao(grupo._id);
     }
     
-    // Agora, buscar o usuário com o grupo populado
     const userComGrupo = await User.findById(user._id).populate('grupoAtivo');
     res.json({ 
       phone: userComGrupo.phone, 
@@ -2445,7 +2442,8 @@ app.get("/api/user/:phone", authMiddleware, async (req, res) => {
 // Rota para listar todos os grupos do usuário
 app.get("/api/meus-grupos/:phone", authMiddleware, async (req, res) => {
   try {
-    const user = await User.findOne({ phone: req.params.phone });
+    const rawPhone = normalizarPhone(req.params.phone);
+    const user = await User.findOne({ phone: rawPhone });
     if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
     const grupos = await Grupo.find({ "membros.userId": user._id });
     res.json(grupos);
@@ -2457,10 +2455,10 @@ app.get("/api/meus-grupos/:phone", authMiddleware, async (req, res) => {
 // Rota para trocar o grupo ativo
 app.post("/api/trocar-grupo", authMiddleware, async (req, res) => {
   try {
-    const { phone, grupoId } = req.body;
+    let { phone, grupoId } = req.body;
+    phone = normalizarPhone(phone);
     const user = await User.findOne({ phone });
     if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
-    // Verificar se o usuário pertence ao grupo
     const grupo = await Grupo.findById(grupoId);
     if (!grupo) return res.status(404).json({ erro: "Grupo não encontrado" });
     if (!grupo.membros.some(m => m.userId.toString() === user._id.toString())) {
@@ -2477,7 +2475,8 @@ app.post("/api/trocar-grupo", authMiddleware, async (req, res) => {
 // Rota para gerar código de convite (admin)
 app.post("/api/convidar-grupo", authMiddleware, async (req, res) => {
   try {
-    const { phone, grupoId } = req.body;
+    let { phone, grupoId } = req.body;
+    phone = normalizarPhone(phone);
     const user = await User.findOne({ phone });
     if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
     const grupo = await Grupo.findById(grupoId);
@@ -2501,7 +2500,8 @@ app.post("/api/convidar-grupo", authMiddleware, async (req, res) => {
 // Rota para aceitar convite (entrar em grupo)
 app.post("/api/aceitar-convite", authMiddleware, async (req, res) => {
   try {
-    const { phone, codigo } = req.body;
+    let { phone, codigo } = req.body;
+    phone = normalizarPhone(phone);
     const user = await User.findOne({ phone });
     if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
     const convite = await Convite.findOne({ codigo, usado: false, expiraEm: { $gt: new Date() } });
@@ -2533,7 +2533,8 @@ app.post("/api/aceitar-convite", authMiddleware, async (req, res) => {
 // Rota para remover membro (admin)
 app.post("/api/remover-membro", authMiddleware, async (req, res) => {
   try {
-    const { phone, grupoId, membroId } = req.body;
+    let { phone, grupoId, membroId } = req.body;
+    phone = normalizarPhone(phone);
     const user = await User.findOne({ phone });
     if (!user) return res.status(404).json({ erro: "Usuário não encontrado" });
     const grupo = await Grupo.findById(grupoId);
@@ -2551,36 +2552,29 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
   }
 });
 
-// --- MIGRAÇÃO DE DADOS EXISTENTES (executa uma vez na inicialização) ---
+// --- MIGRAÇÃO DE DADOS EXISTENTES ---
 (async () => {
   try {
-    // Remove o índice único problemático se existir (opcional, mas seguro)
     try {
       await Grupo.collection.dropIndex('codigoConvite_1');
       console.log("✅ Índice antigo removido.");
     } catch (e) { /* índice não existia */ }
-
-    // Recria o índice com sparse
     await Grupo.collection.createIndex({ codigoConvite: 1 }, { sparse: true });
     console.log("✅ Índice corrigido (sem unique).");
-
     const users = await User.find({});
     for (const user of users) {
       if (!user.grupoAtivo) {
-        // Verificar se já existe um grupo pessoal para este usuário (pelo donoId)
         let grupo = await Grupo.findOne({ donoId: user._id, nome: "Pessoal" });
         if (!grupo) {
           grupo = await Grupo.create({
             nome: "Pessoal",
             donoId: user._id,
             membros: [{ userId: user._id, papel: "admin" }],
-            codigoConvite: null  // explícito
+            codigoConvite: null
           });
         }
         user.grupoAtivo = grupo._id;
         await user.save();
-
-        // Migrar dados (apenas se não tiverem sido migrados)
         await Wallet.updateMany({ phone: user.phone }, { grupoId: grupo._id });
         await Finance.updateMany({ phone: user.phone }, { grupoId: grupo._id });
         await Recorrencia.updateMany({ phone: user.phone }, { grupoId: grupo._id });
@@ -2593,7 +2587,6 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
         await Meta.updateMany({ phone: user.phone }, { grupoId: grupo._id });
         await HistoricoInvestimento.updateMany({ phone: user.phone }, { grupoId: grupo._id });
         await PatrimonioHistorico.updateMany({ phone: user.phone }, { grupoId: grupo._id });
-
         await criarCategoriasPadrao(grupo._id);
       }
     }
@@ -2603,16 +2596,15 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
   }
 })();
 
-// ========== IMPORTAÇÃO OFX (somente Premium/Black) ==========
+// ========== IMPORTAÇÃO OFX ==========
 app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
   try {
-    const { phone } = req.body;
+    let { phone } = req.body;
+    phone = normalizarPhone(phone);
     const user = await User.findOne({ phone });
     if (!user || (user.plano !== 'premium' && user.plano !== 'black')) {
       return res.status(403).json({ erro: "Funcionalidade exclusiva para planos Premium e Black" });
     }
-    // Aqui virá a lógica de processamento do arquivo OFX
-    // (parsear, extrair transações, salvar no grupo do usuário)
     res.json({ msg: "Funcionalidade OFX em desenvolvimento. Em breve!" });
   } catch (err) {
     res.status(500).json({ erro: err.message });
