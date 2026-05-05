@@ -1813,6 +1813,50 @@ app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
   res.json({ msg: "Funcionalidade OFX em breve" });
 });
 
+// ================= ROTAS DE GRUPOS (GESTÃO COMPARTILHADA) =================
+
+// Criar um novo grupo (via painel)
+app.post("/api/criar-grupo", authMiddleware, async (req, res) => {
+  try {
+    const { phone, nome } = req.body;
+    if (!phone || !nome) {
+      return res.status(400).json({ erro: "phone e nome são obrigatórios" });
+    }
+
+    // Normaliza o telefone
+    const rawPhone = phone.replace(/\D/g, '');
+    let user = await User.findOne({ phone: rawPhone });
+    if (!user) {
+      return res.status(404).json({ erro: "Usuário não encontrado. Ele precisa ter interagido com o bot antes." });
+    }
+
+    // Verifica se já existe um grupo com esse nome para o mesmo dono
+    const existente = await Grupo.findOne({ donoId: user._id, nome });
+    if (existente) {
+      return res.status(400).json({ erro: `Você já possui um grupo com o nome "${nome}".` });
+    }
+
+    const novoGrupo = await Grupo.create({
+      nome,
+      donoId: user._id,
+      membros: [{ userId: user._id, papel: "admin" }],
+      codigoConvite: null
+    });
+
+    // Opcional: definir este como grupo ativo
+    user.grupoAtivo = novoGrupo._id;
+    await user.save();
+
+    // Criar categorias padrão para o novo grupo
+    await criarCategoriasPadrao(novoGrupo._id);
+
+    res.json({ ok: true, grupo: novoGrupo });
+  } catch (err) {
+    console.error("Erro ao criar grupo:", err);
+    res.status(500).json({ erro: err.message });
+  }
+});
+
 // ================= NOVAS ROTAS PARA O PAINEL LOVABLE (adaptadas para grupoId) =================
 
 // --- CONTAS BANCÁRIAS (WALLETS) ---
