@@ -88,8 +88,11 @@ Uso *hoje automaticamente*
 🔁 *Contas fixas (recorrentes)*
 - "todo mês 1000 aluguel dia 5"
 
-🎯 *Meta mensal de gastos*
-- "meta 2000"
+🎯 *Limite mensal de gastos*
+- "limite 2000"
+- "limite geral 2000"
+*Ou por categoria:*
+- "Limite Lazer e Entretenimento 500"
 
 🔔 *Alertas*
 - "limite mercado 500"
@@ -480,6 +483,14 @@ function interpretarRapido(message) {
     };
   }
 
+  const cancelarRecorrênciaMatch = msg.match(/(cancelar|parar)\s+recorr[eê]ncia\s+(.+)/i);
+  if (cancelarRecorrênciaMatch) {
+    return {
+      acao: "cancelar_recorrencia",
+      descricao: cancelarRecorrênciaMatch[2].trim()
+    };
+  }
+
   const deletarContaMatch = msg.match(/deletar\s+conta\s+(.+)/i);
   if (deletarContaMatch) {
     return { acao: "deletar_conta", nome: deletarContaMatch[1].trim().toUpperCase() };
@@ -535,23 +546,39 @@ if (parcelaPagaMatch) {
       observacao: message, pago: true, recorrente: false
     };
   }
-  const setWalletMatch = msg.match(/^([a-zà-ú\s]+(?: crédito)?)\s+(\d+(?:[.,]\d{2})?)$/i);
+    const setWalletMatch = msg.match(/^([a-zà-ú\s]+(?: crédito)?)\s+(\d+(?:[.,]\d{2})?)$/i);
   if (setWalletMatch) {
     let nomeConta = setWalletMatch[1].trim();
     let valor = parseFloat(setWalletMatch[2].replace(',', '.'));
     if (isNaN(valor)) valor = 0;
     return { acao: "set_wallet", nome: nomeConta, valor: valor };
   }
+
+  // Comandos de navegação e ajuda
   if (msg.includes("painel")) return { acao: "painel" };
   if (msg.match(/(funções|funcoes|ajuda|help|menu|o que você faz)/i)) return { acao: "ajuda" };
-  const metaMatch = msg.match(/meta\s+(\d+(?:[.,]\d{2})?)/i);
-  if (metaMatch) return { acao: "set_meta", valor: Number(metaMatch[1].replace(',', '.')) };
+
+  // Comandos de consulta rápida
   if (msg.includes("gastos") || msg.includes("compras")) return { acao: "buscar", termo: "TUDO" };
   if (msg.match(/(resumo|relatorio|relatório)/i)) return { acao: "resumo" };
   if (msg.includes("saldo")) return { acao: "ver_saldos" };
+
+  // 🆕 Limite geral (meta mensal) – substitui o antigo comando "meta"
+  const limiteGeralMatch = msg.match(/^limite\s+geral\s+(\d+(?:[.,]\d{2})?)$/i);
+  if (limiteGeralMatch) {
+    return { acao: "set_meta", valor: parseFloat(limiteGeralMatch[1].replace(',', '.')) };
+  }
+  const limiteSimplesMatch = msg.match(/^limite\s+(\d+(?:[.,]\d{2})?)$/i);
+  if (limiteSimplesMatch) {
+    return { acao: "set_meta", valor: parseFloat(limiteSimplesMatch[1].replace(',', '.')) };
+  }
+
+  // Limite por categoria
   const limiteMatch = msg.match(/limite\s+([a-zà-ú]+)\s+(\d+(?:[.,]\d{2})?)/i);
   if (limiteMatch) return { acao: "set_limite", categoria: limiteMatch[1], valor: parseFloat(limiteMatch[2].replace(',', '.')) };
   if (msg.includes("meus limites")) return { acao: "meus_limites" };
+
+  // Lembretes
   const lembreteMatch = msg.match(/(lembrar|lembrete)\s+(pagar|receber)\s+(.+)\s+dia\s+(\d{1,2})\/(\d{1,2})\s+valor\s+(\d+(?:[.,]\d{2})?)/i);
   if (lembreteMatch) {
     return {
@@ -560,13 +587,15 @@ if (parcelaPagaMatch) {
       valor: parseFloat(lembreteMatch[6].replace(',', '.'))
     };
   }
+
+  // Exclusão de transações
   if (msg.match(/(excluir|apagar|deletar)/i)) {
     if (msg.match(/(ultima|última)/i)) return { acao: "apagar" };
     const idMatch = msg.match(/([A-Z0-9]{6})/i);
     return { acao: "apagar", idCurto: idMatch ? idMatch[1].toUpperCase() : null };
   }
+
   return null;
-}
 
 async function verificarLimiteCategoria(grupoId, categoria, valorGasto, phone) {
   const inicioMes = new Date();
@@ -1223,6 +1252,23 @@ if (data.acao === "conversa") {
       if (!nomesOficiais[nomeEntrada]) carteiraFinal = "Dinheiro";
       await Recorrencia.create({ grupoId: grupoAtual._id, tipo: data.tipo || "Gasto", valor: valorLimpo, categoria: data.categoria, diaVencimento: data.dia, descricao: data.observacao, carteira: carteiraFinal });
       await sendZap(phone, `📌 *Agendado!* Todo dia ${data.dia} no *${carteiraFinal}*.`);
+    }
+        else if (data.acao === "cancelar_recorrencia") {
+      const descricao = data.descricao;
+      // Busca recorrência ativa no grupo atual, ignorando maiúsculas/minúsculas
+      const recorrencia = await Recorrencia.findOne({
+        grupoId: grupoAtual._id,
+        descricao: { $regex: new RegExp(`^${descricao}$`, 'i') },
+        ativa: true
+      });
+      if (!recorrencia) {
+        await sendZap(phone, `❌ Não encontrei nenhuma recorrência ativa com a descrição "${descricao}".`);
+        return;
+      }
+      // Marca como inativa
+      recorrencia.ativa = false;
+      await recorrencia.save();
+      await sendZap(phone, `✅ Recorrência *"${recorrencia.descricao}"* cancelada. Você não será mais cobrado(a) automaticamente.`);
     }
     else if (data.acao === "set_wallet") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
