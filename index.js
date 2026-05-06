@@ -596,6 +596,7 @@ if (parcelaPagaMatch) {
   }
 
   return null;
+}   
 
 async function verificarLimiteCategoria(grupoId, categoria, valorGasto, phone) {
   const inicioMes = new Date();
@@ -1254,22 +1255,23 @@ if (data.acao === "conversa") {
       await sendZap(phone, `📌 *Agendado!* Todo dia ${data.dia} no *${carteiraFinal}*.`);
     }
         else if (data.acao === "cancelar_recorrencia") {
-      const descricao = data.descricao;
-      // Busca recorrência ativa no grupo atual, ignorando maiúsculas/minúsculas
-      const recorrencia = await Recorrencia.findOne({
-        grupoId: grupoAtual._id,
-        descricao: { $regex: new RegExp(`^${descricao}$`, 'i') },
-        ativa: true
-      });
-      if (!recorrencia) {
-        await sendZap(phone, `❌ Não encontrei nenhuma recorrência ativa com a descrição "${descricao}".`);
-        return;
-      }
-      // Marca como inativa
-      recorrencia.ativa = false;
-      await recorrencia.save();
-      await sendZap(phone, `✅ Recorrência *"${recorrencia.descricao}"* cancelada. Você não será mais cobrado(a) automaticamente.`);
-    }
+  const descricao = data.descricao;
+  // Escapa caracteres especiais para uso em regex
+  const escapedDesc = descricao.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Busca recorrência ativa no grupo atual, ignorando maiúsculas/minúsculas
+  const recorrencia = await Recorrencia.findOne({
+    grupoId: grupoAtual._id,
+    descricao: { $regex: new RegExp(`^${escapedDesc}$`, 'i') },
+    ativa: true
+  });
+  if (!recorrencia) {
+    await sendZap(phone, `❌ Não encontrei nenhuma recorrência ativa com a descrição "${descricao}".`);
+    return;
+  }
+  recorrencia.ativa = false;
+  await recorrencia.save();
+  await sendZap(phone, `✅ Recorrência *"${recorrencia.descricao}"* cancelada. Você não será mais cobrado(a) automaticamente.`);
+}
     else if (data.acao === "set_wallet") {
       const valorLimpo = Number(data.valor.toString().replace(',', '.'));
       let nomeOriginal = data.nome.trim();
