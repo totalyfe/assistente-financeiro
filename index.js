@@ -1534,6 +1534,7 @@ for (const [tipo, valor] of Object.entries(agrupado)) {
 
 await sendZap(phone, msg);
     }
+  }
     else if (data.acao === "listar_metas") {
       const isBlack = await verificarPlanoInvestimentos(phone);
       if (!isBlack) {
@@ -1658,6 +1659,7 @@ await sendZap(phone, msg);
         await sendZap(phone, msg);
       }
     }
+
     else if (data.acao === "progresso_meta") {
       const isBlack = await verificarPlanoInvestimentos(phone);
       if (!isBlack) {
@@ -1693,6 +1695,7 @@ await sendZap(phone, msg);
       else if (percentual >= 75) statusEmoji = "📈";
       await sendZap(phone, `🎯 *Progresso da meta "${meta.nome}"*\n\n💰 Objetivo: R$ ${meta.valorObjetivo}\n✅ Já aportado: R$ ${totalAportado.toFixed(2)} (${percentual.toFixed(1)}%)\n📉 Faltam: R$ ${faltante.toFixed(2)}\n⏱️ Aporte mensal sugerido: R$ ${meta.aporteMensalSugerido}\n📅 Tempo estimado restante: ${mesesRestantes} meses (${anosRestantes} anos)\n${statusEmoji} Status: ${meta.status}`);
     }
+
     else if (data.acao === "sugerir_alocacao") {
       const isBlack = await verificarPlanoInvestimentos(phone);
       if (!isBlack) {
