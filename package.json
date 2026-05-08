@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google-cloud/vision": "^5.3.6",
     "axios": "^1.15.0",
     "cloudinary": "^2.9.0",
     "cors": "^2.8.6",
@@ -21,6 +22,7 @@
     "mongoose": "^9.4.1",
     "nanoid": "^5.1.7",
     "node-cron": "^4.2.1",
-    "pdfkit": "^0.18.0"
+    "pdfkit": "^0.18.0",
+    "yahoo-finance2": "^3.14.0"
   }
 }
