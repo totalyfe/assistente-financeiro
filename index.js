@@ -7,6 +7,7 @@ const fs = require('fs');
 const FormData = require('form-data');
 const { nanoid } = require('nanoid');
 const cron = require('node-cron');
+const yahooFinance = require('yahoo-finance2').default;
 
 const app = express();
 app.use(cors());
@@ -241,7 +242,12 @@ const Investimento = mongoose.model("Investimento", new mongoose.Schema({
   valorAportado: { type: Number, default: 0 },
   dataCompra: { type: Date, default: Date.now },
   valorAtual: { type: Number, default: 0 },
-  rentabilidade: { type: Number, default: 0 }
+  rentabilidade: { type: Number, default: 0 },
+  ticker: { type: String, default: null, index: true },           // ex: "PETR4.SA", "AAPL", "BTC-USD"
+  dividendosAcumulados: { type: Number, default: 0 }, // total de proventos já recebidos
+  ultimoDividendo: { type: Number, default: 0 },      // valor do último dividendo pago (opcional)
+  dataUltimoDividendo: { type: Date, default: null },  // data do último dividendo registrado (opcional)
+  ultimaAtualizacao: { type: Date, default: Date.now }
 }));
 
 const Aporte = mongoose.model("Aporte", new mongoose.Schema({
@@ -562,6 +568,7 @@ if (parcelaPagaMatch) {
   if (msg.includes("gastos") || msg.includes("compras")) return { acao: "buscar", termo: "TUDO" };
   if (msg.match(/(resumo|relatorio|relatório)/i)) return { acao: "resumo" };
   if (msg.includes("saldo")) return { acao: "ver_saldos" };
+  if (msg.includes("dividendos") || msg.includes("proventos")) return { acao: "ver_dividendos" };
 
   // 🆕 Limite geral (meta mensal) – substitui o antigo comando "meta"
   const limiteGeralMatch = msg.match(/^limite\s+geral\s+(\d+(?:[.,]\d{2})?)$/i);
@@ -698,6 +705,37 @@ Dicas:`;
   }, { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } });
 
   return response.data.choices[0].message.content;
+}
+
+// ========== INTEGRAÇÃO COM YAHOO FINANCE ==========
+async function buscarDadosYahoo(ticker, dataCompra) {
+  try {
+    // Busca cotação atual
+    const quote = await yahooFinance.quote(ticker);
+    const precoAtual = quote.regularMarketPrice;
+    
+    // Busca dividendos históricos (se disponíveis)
+    // Nota: a carteira 'historical' com parâmetro 'events' funciona para ações e FIIs,
+    // mas para alguns ativos (ex: ETFs acumuladores) pode retornar vazio
+    let dividendosAcumulados = 0;
+    try {
+      const historico = await yahooFinance.historical(ticker, {
+        period1: dataCompra,        // desde a data da compra
+        events: 'dividends'
+      });
+      // Soma todos os dividendos pagos no período
+      for (const item of historico) {
+        if (item.dividends) dividendosAcumulados += item.dividends;
+      }
+    } catch (err) {
+      console.log(`Sem dividendos ou erro ao buscar para ${ticker}:`, err.message);
+    }
+    
+    return { precoAtual, dividendosAcumulados };
+  } catch (err) {
+    console.error(`Erro ao buscar dados do Yahoo para ${ticker}:`, err.message);
+    return null;
+  }
 }
 
 // ========== WEBHOOK PRINCIPAL (adaptado para grupos) ==========
@@ -1414,13 +1452,15 @@ if (data.acao === "conversa") {
         await sendZap(phone, "🚫 A funcionalidade de investimentos está disponível apenas no plano Black. Faça upgrade pelo nosso painel.");
         return;
       }
-      const { tipo, nome, valorAportado, quantidade, precoUnitario } = data;
+      const { tipo, nome, valorAportado, quantidade, precoUnitario, ticker, dataCompra } = data;
       const investimento = await Investimento.create({
         grupoId: grupoAtual._id,
-        tipo, nome, 
+        tipo, nome,
+        ticker: ticker || null,
         quantidade: quantidade || 1, 
         precoUnitario: precoUnitario || valorAportado,
         valorAportado,
+        dataCompra: dataCompra ? new Date(dataCompra) : new Date(),
         valorAtual: (quantidade || 1) * (precoUnitario || valorAportado),
         rentabilidade: 0
       });
@@ -1455,25 +1495,44 @@ if (data.acao === "conversa") {
       if (invs.length === 0) {
         await sendZap(phone, "Você ainda não tem nenhum investimento cadastrado. Diga 'criar investimento' para começar.");
       } else {
-        let totalInv = 0, totalAtual = 0;
-        const agrupado = {};
-        let msg = "📈 *SEUS INVESTIMENTOS:*\n\n";
-        for (const i of invs) {
-          totalInv += i.valorAportado;
-          totalAtual += i.valorAtual;
-          msg += `💰 *${i.nome}* (${i.tipo})\nAportado: R$ ${i.valorAportado} | Atual: R$ ${i.valorAtual}\nRent: ${((i.rentabilidade||0)*100).toFixed(1)}%\n\n`;
-          const tipo = i.tipo;
-          agrupado[tipo] = (agrupado[tipo] || 0) + (i.valorAtual || i.valorAportado);
-        }
-        const rendTotal = totalInv > 0 ? ((totalAtual - totalInv) / totalInv) * 100 : 0;
-        msg += `*TOTAL:* Aportado R$ ${totalInv} | Atual R$ ${totalAtual} | Rent. Total ${rendTotal.toFixed(2)}%\n\n`;
-        msg += "📊 *DISTRIBUIÇÃO DA CARTEIRA:*\n";
-        for (const [tipo, valor] of Object.entries(agrupado)) {
-          const percentual = (valor / totalAtual) * 100;
-          msg += `${tipo}: R$ ${valor} (${percentual.toFixed(1)}%)\n`;
-        }
-        await sendZap(phone, msg);
-      }
+        let totalInv = 0, totalAtual = 0, totalDividendos = 0;
+const agrupado = {};
+let msg = "📈 *SEUS INVESTIMENTOS (com dividendos):*\n\n";
+
+for (const i of invs) {
+  totalInv += i.valorAportado;
+  totalAtual += i.valorAtual;
+  totalDividendos += i.dividendosAcumulados || 0;
+  // rentabilidade já armazenada em decimal (ex: 0.15 = 15%)
+  const rentabilidadeReal = (i.rentabilidade || 0) * 100;
+  
+  msg += `💰 *${i.nome}* (${i.tipo})\n`;
+  msg += `   Aportado: R$ ${i.valorAportado.toFixed(2)}\n`;
+  msg += `   Atual: R$ ${i.valorAtual.toFixed(2)}\n`;
+  msg += `   Dividendos: R$ ${(i.dividendosAcumulados || 0).toFixed(2)}\n`;
+  msg += `   Rentabilidade total: ${rentabilidadeReal.toFixed(2)}% (valorização + proventos)\n\n`;
+  
+  const tipo = i.tipo;
+  agrupado[tipo] = (agrupado[tipo] || 0) + (i.valorAtual + (i.dividendosAcumulados || 0));
+}
+
+const valorPatrimonioComDividendos = totalAtual + totalDividendos;
+const rentabilidadeGeral = totalInv > 0 ? ((valorPatrimonioComDividendos - totalInv) / totalInv) * 100 : 0;
+
+msg += `*RESUMO DA CARTEIRA:*\n`;
+msg += `💵 Total aportado: R$ ${totalInv.toFixed(2)}\n`;
+msg += `📊 Valor atual (sem dividendos): R$ ${totalAtual.toFixed(2)}\n`;
+msg += `💰 Dividendos recebidos: R$ ${totalDividendos.toFixed(2)}\n`;
+msg += `📈 Patrimônio total (atual + dividendos): R$ ${valorPatrimonioComDividendos.toFixed(2)}\n`;
+msg += `🎯 Rentabilidade geral (com proventos): ${rentabilidadeGeral.toFixed(2)}%\n\n`;
+
+msg += "📊 *DISTRIBUIÇÃO POR TIPO (patrimônio total)*:\n";
+for (const [tipo, valor] of Object.entries(agrupado)) {
+  const percentual = (valor / valorPatrimonioComDividendos) * 100;
+  msg += `${tipo}: R$ ${valor.toFixed(2)} (${percentual.toFixed(1)}%)\n`;
+}
+
+await sendZap(phone, msg);
     }
     else if (data.acao === "listar_metas") {
       const isBlack = await verificarPlanoInvestimentos(phone);
@@ -1676,6 +1735,22 @@ if (data.acao === "conversa") {
   }
   const dicas = await gerarDicasFinanceiras(grupoId, phone);
   await sendZap(phone, dicas);
+}
+
+else if (data.acao === "ver_dividendos") {
+  const invs = await Investimento.find({ grupoId: grupoAtual._id, dividendosAcumulados: { $gt: 0 } });
+  if (invs.length === 0) {
+    await sendZap(phone, "📭 Você ainda não recebeu dividendos (ou nenhum investimento com ticker cadastrado).");
+    return;
+  }
+  let msg = "💰 *DIVIDENDOS RECEBIDOS (histórico)*\n\n";
+  let total = 0;
+  for (const inv of invs) {
+    msg += `📌 ${inv.nome} (${inv.ticker}): R$ ${(inv.dividendosAcumulados || 0).toFixed(2)}\n`;
+    total += inv.dividendosAcumulados || 0;
+  }
+  msg += `\n💵 *Total de proventos: R$ ${total.toFixed(2)}*`;
+  await sendZap(phone, msg);
 }
 
     else if (data.acao === "salvar") {
@@ -2097,11 +2172,11 @@ app.get("/api/investimentos/distribuicao/:phone", authMiddleware, checkInvestime
 
 app.post("/api/investimentos", authMiddleware, checkInvestimentosPlan, async (req, res) => {
   try {
-    const { phone, tipo, nome, quantidade, precoUnitario, valorAportado, dataCompra } = req.body;
+    const { phone, tipo, nome, ticker, quantidade, precoUnitario, valorAportado, dataCompra } = req.body;
     const grupoId = await getGrupoFromPhone(phone);
     if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
     const investimento = await Investimento.create({
-      grupoId, tipo, nome, quantidade, precoUnitario, valorAportado, dataCompra,
+      grupoId, tipo, nome, ticker, quantidade, precoUnitario, valorAportado, dataCompra,
       valorAtual: quantidade * precoUnitario,
       rentabilidade: 0
     });
@@ -2378,6 +2453,66 @@ cron.schedule('0 * * * *', async () => {
       await user.save();
     }
   }
+});
+
+// Cron job para atualizar investimentos com ticker via Yahoo Finance (todos os dias às 3h)
+cron.schedule('0 3 * * *', async () => {
+  console.log("🔄 Iniciando atualização automática de investimentos via Yahoo Finance...");
+  
+  // Busca todos os investimentos que possuem ticker (em qualquer grupo)
+  const investimentos = await Investimento.find({ ticker: { $ne: null } });
+  console.log(`📊 Encontrados ${investimentos.length} investimentos com ticker.`);
+  
+  if (investimentos.length === 0) return;
+
+  let atualizados = 0;
+  let erros = 0;
+  
+  for (const inv of investimentos) {
+    try {
+      // Busca preço e dividendos desde a data da compra
+      const dados = await buscarDadosYahoo(inv.ticker, inv.dataCompra);
+      if (!dados) {
+        console.warn(`⚠️ Nenhum dado para ${inv.ticker} (investimento ${inv.nome})`);
+        erros++;
+        continue;
+      }
+      
+      const { precoAtual, dividendosAcumulados: dividendosPorAcao } = dados;
+      
+      // Atualiza valor atual (preço * quantidade)
+      const novoValorAtual = precoAtual * inv.quantidade;
+      // Dividendos totais recebidos até agora
+      const dividendosTotais = dividendosPorAcao * inv.quantidade;
+      
+      // Só atualiza se houve mudança significativa (opcional: evitar gravações desnecessárias)
+      if (novoValorAtual !== inv.valorAtual || dividendosTotais !== inv.dividendosAcumulados) {
+        inv.valorAtual = novoValorAtual;
+        inv.dividendosAcumulados = dividendosTotais;
+        
+        // Recalcula rentabilidade total (preço + dividendos)
+        const valorTotal = inv.valorAtual + inv.dividendosAcumulados;
+        const rentabilidadeTotal = ((valorTotal - inv.valorAportado) / inv.valorAportado) * 100;
+        inv.rentabilidade = rentabilidadeTotal / 100; // armazena como decimal (0.15 para 15%)
+        inv.ultimaAtualizacao = new Date();
+        
+        await inv.save();
+        atualizados++;
+        console.log(`✅ ${inv.nome} (${inv.ticker}) atualizado: Preço R$ ${precoAtual.toFixed(2)}, Dividendos acumulados R$ ${dividendosTotais.toFixed(2)}, Rentabilidade ${rentabilidadeTotal.toFixed(2)}%`);
+      } else {
+        console.log(`⏭️ ${inv.nome} (${inv.ticker}) sem alterações.`);
+      }
+      
+      // Aguarda 1 segundo entre requisições para evitar bloqueio (rate limit)
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+    } catch (err) {
+      console.error(`❌ Erro ao atualizar ${inv.nome} (${inv.ticker}):`, err.message);
+      erros++;
+    }
+  }
+  
+  console.log(`🏁 Atualização concluída: ${atualizados} atualizados, ${erros} erros.`);
 });
 
 // ========== POPULAR CATEGORIAS PADRÃO ==========
