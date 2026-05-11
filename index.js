@@ -233,7 +233,7 @@ const Investimento = mongoose.model("Investimento", new mongoose.Schema({
   grupoId: { type: mongoose.Schema.Types.ObjectId, ref: "Grupo", required: true },
   tipo: { type: String, enum: [
     "Tesouro Direto", "CDB/CDI", "Ações", "FIIs", "ETFs",
-    "Cripto", "Previdência", "Reserva de Emergência",
+    "Cripto", "Previdência", "Fundos", "Reserva de Emergência",
     "Imóveis", "Negócios próprios", "Caixa"
   ], required: true },
   nome: { type: String, required: true },
