@@ -1848,7 +1848,7 @@ function authMiddleware(req, res, next) {
 
 // Middleware para verificar plano Black nas rotas de investimento
 async function checkInvestimentosPlan(req, res, next) {
-  let phone = req.params.phone || req.body.phone;
+  let phone = req.params.phone || req.body.phone || req.query.phone;
   if (!phone) return res.status(400).json({ erro: "phone não fornecido" });
   phone = normalizarPhone(phone);
   const user = await User.findOne({ phone });
