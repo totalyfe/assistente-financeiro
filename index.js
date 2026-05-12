@@ -2203,7 +2203,7 @@ app.put("/api/investimentos/:id", authMiddleware, checkInvestimentosPlan, async 
   }
 });
 
-app.delete("/api/investimentos/:id", authMiddleware, checkInvestimentosPlan, async (req, res) => {
+app.delete("/api/investimentos/:id", authMiddleware, async (req, res) => {
   try {
     await Investimento.findByIdAndDelete(req.params.id);
     res.json({ deleted: true });
