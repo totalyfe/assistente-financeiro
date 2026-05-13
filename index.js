@@ -2938,6 +2938,26 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
   }
 })();
 
+// Rota para planejamento (sobra média mensal)
+app.get("/api/planejamento/:phone", authMiddleware, async (req, res) => {
+  try {
+    const grupoId = await getGrupoFromPhone(req.params.phone);
+    if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
+    
+    const umAnoAtras = new Date(); umAnoAtras.setFullYear(umAnoAtras.getFullYear() - 1);
+    const transacoes = await Finance.find({ grupoId, data: { $gte: umAnoAtras } });
+    let receitas = 0, despesas = 0;
+    transacoes.forEach(t => {
+      if (t.tipo === "Recebimento") receitas += t.valor;
+      else if (t.tipo === "Gasto") despesas += t.valor;
+    });
+    const sobraMedia = (receitas - despesas) / 12;
+    res.json({ sobraMediaMensal: sobraMedia });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
 // ========== IMPORTAÇÃO OFX ==========
 app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
   try {
