@@ -268,6 +268,7 @@ const Meta = mongoose.model("Meta", new mongoose.Schema({
   investimentoId: { type: mongoose.Schema.Types.ObjectId, ref: "Investimento" },
   status: { type: String, enum: ["em andamento", "concluída", "atrasada"], default: "em andamento" },
   dataCriacao: { type: Date, default: Date.now }
+  valorAtual: { type: Number, default: 0 }
 }));
 
 const HistoricoInvestimento = mongoose.model("HistoricoInvestimento", new mongoose.Schema({
@@ -2314,6 +2315,161 @@ app.get("/api/grupo/:id", authMiddleware, async (req, res) => {
     const grupo = await Grupo.findById(req.params.id).populate('membros.userId', 'name phone');
     if (!grupo) return res.status(404).json({ erro: "Grupo não encontrado" });
     res.json(grupo);
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// ========== ROTAS PARA METAS (APLICAR / RESGATAR) ==========
+
+// Aplicar dinheiro em uma meta (incrementa valorAtual)
+app.post("/api/metas/aplicar", authMiddleware, checkInvestimentosPlan, async (req, res) => {
+  try {
+    const { phone, metaId, valor } = req.body;
+    if (!metaId || !valor || valor <= 0) {
+      return res.status(400).json({ erro: "metaId e valor (positivo) são obrigatórios" });
+    }
+
+    const grupoId = await getGrupoFromPhone(phone);
+    if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
+
+    const meta = await Meta.findOne({ _id: metaId, grupoId });
+    if (!meta) return res.status(404).json({ erro: "Meta não encontrada" });
+
+    // Se a meta já foi concluída, não permite aplicar mais
+    if (meta.status === "concluída") {
+      return res.status(400).json({ erro: "Esta meta já foi concluída" });
+    }
+
+    const novoValor = meta.valorAtual + valor;
+    if (novoValor > meta.valorObjetivo) {
+      // Se ultrapassar, marca como concluída e ajusta para o valor objetivo
+      meta.valorAtual = meta.valorObjetivo;
+      meta.status = "concluída";
+      await meta.save();
+      // Opcional: registrar transação Finance como "Aporte para meta"
+      await Finance.create({
+        grupoId,
+        idCurto: nanoid(6),
+        tipo: "Aporte",
+        categoria: "Meta",
+        valor: valor,
+        observacao: `Aporte para meta "${meta.nome}"`,
+        pago: true
+      });
+      return res.json({ ok: true, meta, mensagem: "Meta concluída com sucesso!" });
+    }
+
+    meta.valorAtual = novoValor;
+    // Se atingiu exatamente o objetivo
+    if (meta.valorAtual >= meta.valorObjetivo) {
+      meta.status = "concluída";
+    }
+    await meta.save();
+
+    // Registrar transação (opcional, mas útil para histórico)
+    await Finance.create({
+      grupoId,
+      idCurto: nanoid(6),
+      tipo: "Aporte",
+      categoria: "Meta",
+      valor: valor,
+      observacao: `Aporte para meta "${meta.nome}"`,
+      pago: true
+    });
+
+    res.json({ ok: true, meta });
+  } catch (err) {
+    console.error("Erro ao aplicar na meta:", err);
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Resgatar dinheiro de uma meta (decrementa valorAtual)
+app.post("/api/metas/resgatar", authMiddleware, checkInvestimentosPlan, async (req, res) => {
+  try {
+    const { phone, metaId, valor } = req.body;
+    if (!metaId || !valor || valor <= 0) {
+      return res.status(400).json({ erro: "metaId e valor (positivo) são obrigatórios" });
+    }
+
+    const grupoId = await getGrupoFromPhone(phone);
+    if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
+
+    const meta = await Meta.findOne({ _id: metaId, grupoId });
+    if (!meta) return res.status(404).json({ erro: "Meta não encontrada" });
+
+    if (meta.valorAtual < valor) {
+      return res.status(400).json({ erro: "Valor insuficiente na meta para resgatar" });
+    }
+
+    const novoValor = meta.valorAtual - valor;
+    meta.valorAtual = novoValor;
+    // Se resgatou tudo, o status volta a "em andamento" (ou pode ser "cancelada"? Vamos manter "em andamento")
+    if (meta.status === "concluída" && novoValor < meta.valorObjetivo) {
+      meta.status = "em andamento";
+    }
+    await meta.save();
+
+    // Registrar transação (saída)
+    await Finance.create({
+      grupoId,
+      idCurto: nanoid(6),
+      tipo: "Resgate",
+      categoria: "Meta",
+      valor: valor,
+      observacao: `Resgate da meta "${meta.nome}"`,
+      pago: true
+    });
+
+    res.json({ ok: true, meta });
+  } catch (err) {
+    console.error("Erro ao resgatar da meta:", err);
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Calcula a data prevista para atingir a meta (com base no aporte mensal sugerido)
+app.get("/api/metas/previsao/:metaId", authMiddleware, checkInvestimentosPlan, async (req, res) => {
+  try {
+    const { phone } = req.query; // phone como query string
+    const { metaId } = req.params;
+    if (!phone) return res.status(400).json({ erro: "phone é obrigatório" });
+
+    const grupoId = await getGrupoFromPhone(phone);
+    if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
+
+    const meta = await Meta.findOne({ _id: metaId, grupoId });
+    if (!meta) return res.status(404).json({ erro: "Meta não encontrada" });
+
+    if (meta.valorAtual >= meta.valorObjetivo) {
+      return res.json({ dataPrevista: new Date().toISOString(), faltando: 0 });
+    }
+
+    const aporteMensal = meta.aporteMensalSugerido;
+    const faltante = meta.valorObjetivo - meta.valorAtual;
+    const jurosMensal = Math.pow(1 + (meta.taxaAnual / 100), 1/12) - 1;
+
+    // Se aporte mensal é suficiente com juros, calcula quantos meses
+    let meses = 0;
+    let acumulado = meta.valorAtual;
+    if (aporteMensal > 0) {
+      while (acumulado < meta.valorObjetivo && meses < 600) { // limite 50 anos
+        acumulado = acumulado * (1 + jurosMensal) + aporteMensal;
+        meses++;
+      }
+    } else {
+      // Sem aporte, usa só juros (nunca atinge)
+      meses = -1;
+    }
+
+    let dataPrevista = null;
+    if (meses > 0 && meses < 600) {
+      dataPrevista = new Date();
+      dataPrevista.setMonth(dataPrevista.getMonth() + meses);
+    }
+
+    res.json({ dataPrevista, meses, faltante, aporteMensal });
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
