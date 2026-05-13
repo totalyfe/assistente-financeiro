@@ -267,7 +267,7 @@ const Meta = mongoose.model("Meta", new mongoose.Schema({
   taxaAnual: { type: Number, default: 0.1 },
   investimentoId: { type: mongoose.Schema.Types.ObjectId, ref: "Investimento" },
   status: { type: String, enum: ["em andamento", "concluída", "atrasada"], default: "em andamento" },
-  dataCriacao: { type: Date, default: Date.now }
+  dataCriacao: { type: Date, default: Date.now },
   valorAtual: { type: Number, default: 0 }
 }));
 
