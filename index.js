@@ -2938,6 +2938,21 @@ app.post("/api/remover-membro", authMiddleware, async (req, res) => {
   }
 })();
 
+// ========== IMPORTAÇÃO OFX ==========
+app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
+  try {
+    let { phone } = req.body;
+    phone = normalizarPhone(phone);
+    const user = await User.findOne({ phone });
+    if (!user || (user.plano !== 'premium' && user.plano !== 'black')) {
+      return res.status(403).json({ erro: "Funcionalidade exclusiva para planos Premium e Black" });
+    }
+    res.json({ msg: "Funcionalidade OFX em desenvolvimento. Em breve!" });
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
 // Rota para planejamento (sobra média mensal)
 app.get("/api/planejamento/:phone", authMiddleware, async (req, res) => {
   try {
@@ -2953,21 +2968,6 @@ app.get("/api/planejamento/:phone", authMiddleware, async (req, res) => {
     });
     const sobraMedia = (receitas - despesas) / 12;
     res.json({ sobraMediaMensal: sobraMedia });
-  } catch (err) {
-    res.status(500).json({ erro: err.message });
-  }
-});
-
-// ========== IMPORTAÇÃO OFX ==========
-app.post("/api/importar-ofx", authMiddleware, async (req, res) => {
-  try {
-    let { phone } = req.body;
-    phone = normalizarPhone(phone);
-    const user = await User.findOne({ phone });
-    if (!user || (user.plano !== 'premium' && user.plano !== 'black')) {
-      return res.status(403).json({ erro: "Funcionalidade exclusiva para planos Premium e Black" });
-    }
-    res.json({ msg: "Funcionalidade OFX em desenvolvimento. Em breve!" });
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
