@@ -268,7 +268,8 @@ const Meta = mongoose.model("Meta", new mongoose.Schema({
   investimentoId: { type: mongoose.Schema.Types.ObjectId, ref: "Investimento" },
   status: { type: String, enum: ["em andamento", "concluída", "atrasada"], default: "em andamento" },
   dataCriacao: { type: Date, default: Date.now },
-  valorAtual: { type: Number, default: 0 }
+  valorAtual: { type: Number, default: 0 },
+   imagemUrl: { type: String, default: null }
 }));
 
 const HistoricoInvestimento = mongoose.model("HistoricoInvestimento", new mongoose.Schema({
@@ -2240,6 +2241,30 @@ app.post("/api/metas", authMiddleware, checkInvestimentosPlan, async (req, res) 
     });
     res.json(meta);
   } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+// Atualizar apenas a imagem da meta
+app.patch("/api/metas/:id/imagem", authMiddleware, async (req, res) => {
+  try {
+    const { phone, imagemUrl } = req.body;
+    if (!phone || !imagemUrl) {
+      return res.status(400).json({ erro: "phone e imagemUrl são obrigatórios" });
+    }
+    
+    const grupoId = await getGrupoFromPhone(phone);
+    if (!grupoId) return res.status(404).json({ erro: "Grupo não encontrado" });
+    
+    const meta = await Meta.findOne({ _id: req.params.id, grupoId });
+    if (!meta) return res.status(404).json({ erro: "Meta não encontrada" });
+    
+    meta.imagemUrl = imagemUrl;
+    await meta.save();
+    
+    res.json({ ok: true, meta });
+  } catch (err) {
+    console.error("Erro ao atualizar imagem da meta:", err);
     res.status(500).json({ erro: err.message });
   }
 });
